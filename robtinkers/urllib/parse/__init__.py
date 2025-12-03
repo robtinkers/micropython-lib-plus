@@ -1,56 +1,48 @@
-def charsub(s, subs, safe=''):
-    """Replace multiple characters in a string in one pass."""
-    result = []
-    i = 0
-    for j, c in enumerate(s):
-        if c in subs and c not in safe:
-            result.append(s[i:j])
-            result.append(subs[c])
-            i = j + 1
-    result.append(s[i:])
-    return ''.join(result)
-
-_ESCAPE_SUBS = {
-    '&': '&amp;',
-    '>': '&gt;',
-    '<': '&lt;',
-    '"': '&quot;',
-    "'": '&#x27;',
-}
-
-def escape(s):
-    """Similar to html.escape()."""
-    return charsub(s, _ESCAPE_SUBS)
 
 _QUOTE_PLUS = {
-    '\n':'%0A',
-    '\r':'%0D',
-    '"': '%22',
-    '#': '%23',
-    '%': '%25',
-    '&': '%26',
-    "'": '%27',
-    '+': '%2B',
-    '/': '%2F',
-    ';': '%3B',
-    '=': '%3D',
-    '?': '%3F',
-    ' ': '+',
+    ord('\t'):'%09',
+    ord('\n'):'%0A',
+    ord('\r'):'%0D',
+    ord('"'): '%22',
+    ord('#'): '%23',
+    ord('%'): '%25',
+    ord('&'): '%26',
+    ord("'"): '%27',
+    ord('+'): '%2B',
+    ord('/'): '%2F',
+    ord(';'): '%3B',
+    ord('='): '%3D',
+    ord('?'): '%3F',
+    ord(' '): '+',
 }
 
 def quote_plus(s, safe=''):
-    """Similar to urllib.parse.quote_plus() but uses a blacklist for efficiency."""
-    return charsub(s, _QUOTE_PLUS, safe)
+    # Similar to Cpython but uses a blacklist for efficiency
+    # Adapted from micropython-lib string.translate()
+    import io
+
+    sb = io.StringIO()
+    for c in s:
+        v = ord(c)
+        if v in _QUOTE_PLUS and c not in _safe:
+            v = _QUOTE_PLUS[v]
+            if isinstance(v, int):
+                sb.write(chr(v))
+            elif v is not None:
+                sb.write(v)
+        else:
+            sb.write(c)
+    return sb.getvalue()
 
 def quote(s, safe='/'):
-    """Similar to urllib.parse.quote() but uses a blacklist for efficiency."""
-    s = charsub(s, _QUOTE_PLUS, safe)
-    if '+' in s:
+    # Similar to Cpython but uses a blacklist for efficiency
+    s = quote_plus(s, safe)
+    if '+' in s:  # Avoid creating a new object if not necessary
         s = s.replace('+', '%20')
     return s
 
 def unquote(s):
-    """Similar to urllib.parse.unquote(). Raises ValueError if unable to percent-decode."""
+    # Similar to Cpython. Raises ValueError if unable to percent-decode.
     if '%' not in s:
         return s
     parts = s.split('%')
@@ -64,13 +56,13 @@ def unquote(s):
     return result.decode()
 
 def unquote_plus(s):
-    """Similar to urllib.parse.unquote_plus()."""
+    # Similar to Cpython
     if '+' in s:  # Avoid creating a new object if not necessary
         s = s.replace('+', ' ')
     return unquote(s)
 
 def urlencode(data):
-    """Similar to urllib.parse.urlencode()."""
+    # Similar to Cpython
     parts = []
     for key, val in data.items():
         if True:  # emulates quote_via=quote_plus
@@ -79,17 +71,11 @@ def urlencode(data):
             parts.append(key + '=' + val)
     return '&'.join(parts)
 
-def urldecode(qs, maxpairs=None):
-    """
-    Similar to urllib.parse.parse_qs() but returns a simple dict, not a dict of lists.
-    
-    For example, urldecode('foo=1&bar=2&baz') returns {'foo': '1', 'bar': '2', 'baz': ''}.
-    """
+def urldecode(qs):
+    # Similar to CPython but returns a simple dict, not a dict of lists.
+    # For example, urldecode('foo=1&bar=2&baz') returns {'foo': '1', 'bar': '2', 'baz': ''}.
     data = {}
-    if maxpairs is None:
-        parts = qs.split('&')
-    else:
-        parts = qs.split('&', maxpairs)[:maxpairs]
+    parts = qs.split('&')
     for part in parts:
         key, sep, val = part.partition('=')
         if True:
@@ -97,3 +83,4 @@ def urldecode(qs, maxpairs=None):
         if key:
             data[key] = val
     return data
+

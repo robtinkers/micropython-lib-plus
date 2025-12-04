@@ -69,11 +69,11 @@ def unquote(s, *, _plus=False):
     if s == '':
         return ''
     
-    bmv = memoryview(s)
+    bmv = memoryview(s) # In micropython, memoryview(str) returns read-only UTF-8 bytes
     
     res = io.BytesIO()
     
-    # Pre-allocate tiny buffers
+    # Pre-allocate tiny buffers to avoid creating bytes objects inside the loop
     tmp1 = bytearray(1)
     tmp1mv = memoryview(tmp1)
     
@@ -94,11 +94,11 @@ def unquote(s, *, _plus=False):
         if i < k:
             res.write(bmv[i:k])
         
-        # Handle '+' converting to space
         if byte == 43 and _plus: 
+            # Found '+' (if _plus)
             res.write(b' ')
-        # Handle '%' hex escape
         else:
+            # Found '%'
             try:
                 digit1 = bmv[k+1]
                 digit2 = bmv[k+2]
@@ -129,7 +129,7 @@ def unquote(s, *, _plus=False):
     if i < n:
         res.write(bmv[i:])
     
-    return res.getvalue().decode('utf-8')
+    return res.getvalue().decode('utf-8') # can raise UnicodeError
 
 
 def unquote_plus(s):

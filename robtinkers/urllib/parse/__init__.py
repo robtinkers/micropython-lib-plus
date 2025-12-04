@@ -69,42 +69,39 @@ def unquote(s, *, _plus=False):
     if s == '':
         return ''
     
-    bmv = memoryview(s) # In micropython, memoryview(str) returns read-only UTF-8 bytes
+    bmv = memoryview(s)
     
     res = io.BytesIO()
     
-    # Pre-allocate tiny buffers to avoid creating bytes objects inside the loop
+    # Pre-allocate tiny buffers
     tmp1 = bytearray(1)
     tmp1mv = memoryview(tmp1)
     
-    i = 0
+    i = 0 # The beginning of the unprocessed chunk
+    k = 0 # The active cursor looking ahead
     n = len(bmv)
-    start = 0
     
-    while (i < n):
-        byte = bmv[i]
+    while (k < n):
+        byte = bmv[k]
+        
+        # If it's not a special char (%, or + if _plus), keep scouting
         if (byte != 37) and (byte != 43 or not _plus):
-            i += 1
+            k += 1
             continue
-        # Found '%' or '+' (if _plus)
+        # Found a special character.
         
-        # Write pending data
-        if start < i:
-            res.write(bmv[start:i])
+        # First, flush the safe text we've "anchored" so far
+        if i < k:
+            res.write(bmv[i:k])
         
-        # Found '+' (if _plus)
-        if byte == 43 and _plus: # +
+        # Handle '+' converting to space
+        if byte == 43 and _plus: 
             res.write(b' ')
-            i += 1
-            start = i
-            continue
-        
-        # We must have found '%'
-        if i + 2 < n:
+        # Handle '%' hex escape
+        else:
             try:
-                # Manual hex conversion to avoid slicing allocation
-                digit1 = bmv[i+1]
-                digit2 = bmv[i+2]
+                digit1 = bmv[k+1]
+                digit2 = bmv[k+2]
                 
                 # Convert ASCII hex char to int
                 if 48 <= digit1 <= 57: d1 = digit1 - 48
@@ -119,22 +116,20 @@ def unquote(s, *, _plus=False):
                 
                 tmp1mv[0] = (d1 << 4) | d2
                 res.write(tmp1)
-                i += 3
-                start = i
-                continue
-            except ValueError:
-                pass
+                
+                k += 2
+            except (ValueError, IndexError):
+                # Invalid or partial %, treat as literal
+                res.write(b'%')
         
-        # Invalid hex or incomplete, keep the % literal and advance by 1
-        res.write(b'%')
-        i += 1
-        start = i
+        k += 1
+        i = k
     
-    # Write remainder
-    if start < n:
-        res.write(bmv[start:])
+    # Flush any remaining text after the loop
+    if i < n:
+        res.write(bmv[i:])
     
-    return res.getvalue().decode('utf-8') # can raise UnicodeError
+    return res.getvalue().decode('utf-8')
 
 
 def unquote_plus(s):
@@ -242,29 +237,49 @@ def urlunsplit(components):
 
 
 def _normalize_path(path):
-    if path == '':
+    if not path:
         return path
-    
-    absolute_path = path.startswith('/')
-    
+
+    is_abs = path.startswith('/')
     stack = []
-    for seg in path.split('/'):
-        if seg == '..':
+    
+    i = 0
+    n = len(path)
+    
+    while (i < n):
+        # Find the next '/'
+        k = path.find('/', i)
+        if k == -1:
+            k = n
+        
+        if k == i:
+            # Empty segment (//)
+            pass
+        elif k == i + 1 and path[i] == '.':
+            # Current dir (.)
+            pass
+        elif k == i + 2 and path[i] == '.' and path[i+1] == '.':
+            # Parent dir (..) logic
             if stack and stack[-1] != '..':
                 stack.pop()
-            elif not absolute_path:
-                stack.append(seg)
-        elif seg != '.' and seg != '':
-            stack.append(seg)
-    
+            elif not is_abs:
+                stack.append('..')
+        else:
+            # Only allocate the string slice if we are actually keeping it
+            stack.append(path[i:k])
+            
+        i = k + 1
+
+    # Reconstruct the path
     norm = '/'.join(stack)
-    if absolute_path:
+    if is_abs:
         norm = '/' + norm
-    
+
+    # Handle trailing slash preference based on original path
     if path.endswith(('/', '/.', '/..')) or path in ('.', '..'):
         if not norm.endswith('/'):
             norm += '/'
-    
+            
     return norm
 
 
@@ -322,6 +337,7 @@ def parse_qs(qs, keep_blank_values=False, *, unquote_via=unquote_plus, _qsl=Fals
     
     i = 0
     n = len(qs)
+    
     while (i < n):
         k = qs.find('&', i)
         if k == -1:
@@ -331,15 +347,17 @@ def parse_qs(qs, keep_blank_values=False, *, unquote_via=unquote_plus, _qsl=Fals
         if j != -1:
             key = unquote_via(qs[i:j])
             val = unquote_via(qs[j+1:k])
+            valid = True
         elif keep_blank_values:
             key = unquote_via(qs[i:k])
             val = ''
+            valid = True
         else:
-            i = k + 1
-            continue
-        i = k + 1
-        
-        if _qsl:
+            valid = False
+
+        if not valid:
+            pass
+        elif _qsl:
             result.append((key, val))
         elif _qsd:
             result[key] = val
@@ -347,6 +365,8 @@ def parse_qs(qs, keep_blank_values=False, *, unquote_via=unquote_plus, _qsl=Fals
             result[key].append(val)
         else:
             result[key] = [val]
+        
+        i = k + 1
     
     return result
 

@@ -242,30 +242,30 @@ def urlunsplit(components):
 
 
 def _normalize_path(path):
-    if not path:
+    if path == '':
         return path
     
-    is_absolute = path.startswith('/')
+    absolute_path = path.startswith('/')
     
     stack = []
     for seg in path.split('/'):
         if seg == '..':
             if stack and stack[-1] != '..':
                 stack.pop()
-            elif not is_absolute:
+            elif not absolute_path:
                 stack.append(seg)
         elif seg != '.' and seg != '':
             stack.append(seg)
     
-    res = '/'.join(stack)
-    if is_absolute:
-        res = '/' + res
+    norm = '/'.join(stack)
+    if absolute_path:
+        norm = '/' + norm
     
     if path.endswith(('/', '/.', '/..')) or path in ('.', '..'):
-        if not res.endswith('/'):
-            res += '/'
+        if not norm.endswith('/'):
+            norm += '/'
     
-    return res
+    return norm
 
 
 def urljoin(base, url, allow_fragments=True):

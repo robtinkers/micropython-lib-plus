@@ -262,7 +262,7 @@ def _urlsplit(url: str, scheme='', allow_fragments=True) -> tuple:
         url = url[2:]
         netloc, sep, path = url.partition('/')
         if sep or path:
-             path = '/' + path
+            path = '/' + path
     elif url.startswith('/'):
         path = url
     else:

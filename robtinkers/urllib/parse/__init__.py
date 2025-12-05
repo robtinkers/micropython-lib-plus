@@ -96,7 +96,7 @@ quote_from_bytes = quote
 
 
 def quote_plus(s, safe='') -> str:
-    return quote(s, safe, _plus=True)
+    return quote(s, safe=safe, _plus=True)
 
 
 def unquote(s, *, _plus=False) -> str:
@@ -157,7 +157,7 @@ def unquote_plus(s) -> str:
 
 def urlsplit(url:str, scheme='', allow_fragments=True) -> tuple:
     if not isinstance(url, str):
-        raise ValueError('url must be a string')
+        raise TypeError('url must be a string')
     
     if len(url) > 0 and ord(url[0]) <= 32:
         url = url.lstrip() # CPython always does lstrip()
@@ -177,7 +177,7 @@ def urlsplit(url:str, scheme='', allow_fragments=True) -> tuple:
         colon = url.find(':')
         slash = url.find('/')
         # Scheme exists if colon is present and comes before any slash
-        if colon > 0 and (slash == -1 or slash > colon) and url[0].isalpha():
+        if (colon > 0 and url[0].isalpha()) and (slash == -1 or slash > colon):
             scheme = url[:colon].lower()
             url = url[colon+1:]
             if url.startswith('//'):
@@ -195,7 +195,7 @@ def urlsplit(url:str, scheme='', allow_fragments=True) -> tuple:
 
 def netlocsplit(netloc:str) -> tuple: # extension
     if not isinstance(netloc, str):
-        raise ValueError('netloc must be a string')
+        raise TypeError('netloc must be a string')
     
     userinfo, sep, hostport = netloc.rpartition('@')
     if sep:
@@ -257,17 +257,17 @@ def urlunsplit(components: tuple) -> str:
         url = '//' + (netloc or '') + url
         
     if scheme:
-        url = scheme + ':' + url
+        url = f"{scheme}:{url}"
     if query:
-        url = url + '?' + query
+        url = f"{url}?{query}"
     if fragment:
-        url = url + '#' + fragment
+        url = f"{url}#{fragment}"
     return url
 
 
 def _normalize_path(path: str) -> str:
-    if not path:
-        return ''
+    if path == '' or path == '/':
+        return path
     
     slashes = 0
     for char in path:
@@ -294,7 +294,7 @@ def _normalize_path(path: str) -> str:
     if slashes > 0:
         res = ('/' * slashes) + res
     
-    if path.endswith('/') or path.endswith('/.') or path == '.' or path.endswith('/..') or path == '..':
+    if path.endswith('/') or path.endswith('/.') or path.endswith('/..') or path == '.' or path == '..':
         if not res.endswith('/') and not (stack and stack[-1] == '..'):
             if res != '':
                 res += '/'
@@ -304,9 +304,9 @@ def _normalize_path(path: str) -> str:
 
 def urljoin(base:str, url:str, allow_fragments=True) -> str:
     if not isinstance(base, str):
-        raise ValueError('base must be a string')
+        raise TypeError('base must be a string')
     if not isinstance(url, str):
-        raise ValueError('url must be a string')
+        raise TypeError('url must be a string')
     
     if base == '':
         return url
@@ -343,12 +343,32 @@ def urljoin(base:str, url:str, allow_fragments=True) -> str:
     return urlunsplit((us, un, _normalize_path(up), uq, uf))
 
 
-def urlencode(query, doseq=False, safe='', quote_via=quote_plus) -> str:
-    return '&'.join(
-        (quote_via(str(key), safe) + '=' + quote_via(str(v), safe))
-        for key, val in (query.items() if hasattr(query, 'items') else query)
-        for v in (val if doseq else (val,))
-    )
+def _urlencode_generator(query, doseq=False, safe='', *, quote_via=quote_plus):
+    if hasattr(query, 'items'):
+        query = query.items()
+    
+    for key, val in query:
+        if isinstance(key, (str, bytes, bytearray)):
+            key = quote_via(key, safe)
+        else:
+            key = quote_via(str(key), safe)
+        
+        if isinstance(val, (str, bytes, bytearray)):
+            val = quote_via(val, safe)
+            yield f"{key}={val}"
+        elif doseq: # trust the caller
+            for v in val:
+                if isinstance(v, (str, bytes, bytearray)):
+                    v = quote_via(v, safe)
+                else:
+                    v = quote_via(str(v), safe)
+                yield f"{key}={v}"
+        else:
+            val = quote_via(str(val), safe)
+            yield f"{key}={val}"
+
+def urlencode(query, *args, **kwargs) -> str:
+    return '&'.join(_urlencode_generator(query, *args, **kwargs))
 
 
 def _parse_qs_generator(qs:str, keep_blank_values=False, strict_parsing=False, unquote_via=unquote_plus):
@@ -376,21 +396,21 @@ def _parse_qs_generator(qs:str, keep_blank_values=False, strict_parsing=False, u
             if keep_blank_values:
                 yield unquote_via(qs[i:j]), ''
 
-def parse_qs(qs:str, **kwargs) -> dict:
+def parse_qs(qs:str, *args, **kwargs) -> dict:
     res = {}
-    for key, val in _parse_qs_generator(qs, **kwargs):
+    for key, val in _parse_qs_generator(qs, *args, **kwargs):
         if key in res:
             res[key].append(val)
         else:
             res[key] = [val]
     return res
 
-def parse_qsl(qs:str, **kwargs) -> list:
-    return list(_parse_qs_generator(qs, **kwargs))
+def parse_qsl(qs:str, *args, **kwargs) -> list:
+    return list(_parse_qs_generator(qs, *args, **kwargs))
 
-def urldecode(qs:str, **kwargs) -> dict:
+def urldecode(qs:str, *args, **kwargs) -> dict:
     res = {}
-    for key, val in _parse_qs_generator(qs, **kwargs):
+    for key, val in _parse_qs_generator(qs, *args, **kwargs):
         res[key] = val
     return res
 

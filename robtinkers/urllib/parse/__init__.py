@@ -260,36 +260,45 @@ def urlunsplit(components:tuple) -> str:
     return url
 
 
-def _normalize_path(path):
+def _normalize_path(path: str) -> str:
     if not path:
         return ''
     
-    stack = []
     is_abs = path.startswith('/')
     
-    start = 0
-    while True:
-        end = path.find('/', start)
-        if end == -1:
-            segment = path[start:]
-        else:
-            segment = path[start:end]
+    stack = []
+    
+    j = -1
+    if is_abs:
+        j = 0
+    n = len(path)
+    
+    while (j + 1) < n:
+        i = j + 1
+        j = path.find('/', i)
+        if j == -1:
+            j = n
         
-        if segment == '..':
-            if stack and stack[-1] != '..':
-                stack.pop()
+        slen = j - i
+        
+        if slen == 0:
+            pass
+        elif slen == 1 and path[i] == '.':
+            pass
+        elif slen == 2 and path[i] == '.' and path[i+1] == '.':
+            if stack:
+                if stack[-1] == '..':
+                    stack.append('..')
+                else:
+                    stack.pop()
             elif not is_abs:
                 stack.append('..')
-        elif segment != '.' and segment != '':
-            stack.append(segment)
-        
-        if end == -1:
-            break
-        start = end + 1
+        else:
+            stack.append(path[i:j])
     
     if is_abs:
-        return '/' + '/'.join(stack)
-    return '/'.join(stack) or '.'
+        stack.insert(0, '')
+    return '/'.join(stack)
 
 def urljoin(base:str, url:str, allow_fragments=True) -> str:
     if not isinstance(base, str):
@@ -305,33 +314,29 @@ def urljoin(base:str, url:str, allow_fragments=True) -> str:
     bs, bn, bp, bq, bf = urlsplit(base, '', allow_fragments)
     us, un, up, uq, uf = urlsplit(url, '', allow_fragments)
     
-    if us != '' and us != bs:
+    if us:
         return url
+    us = bs
     
-    s, n, p, q, f = bs, bn, up, uq, uf
+    if un:
+        return urlunsplit((us, un, _normalize_path(up), uq, uf))
+    un = bn
     
-    if un != '':
-        n = un
-    elif up == '':
-        # Empty path
-        p = bp
-        if uq == '':
-            q = bq
-            if uf == '':
-                f = bf
-    elif up.startswith('/'):
-        # Absolute path
-        pass # p is already up
-    elif bp == '' or bp.endswith('/'):
-        # Relative path - ...
-        p = bp + up
+    if up:
+        if not up.startswith('/'):
+            if bp:
+                if bp.endswith('/'):
+                    up = bp + up
+                else:
+                    rs = bp.rfind('/')
+                    if rs != -1:
+                        up = bp[:rs+1] + up    
     else:
-        i = bp.rfind('/')
-        if i != -1:
-            # Relative path - ...
-            p = bp[:i+1] + up
+        up = bp
+        if not uq:
+            uq = bq
     
-    return urlunsplit((s, n, _normalize_path(p), q, f))
+    return urlunsplit((us, un, _normalize_path(up), uq, uf))
 
 
 def urlencode(query, doseq=False, safe='', quote_via=quote_plus) -> str:

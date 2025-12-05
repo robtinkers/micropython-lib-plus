@@ -155,7 +155,7 @@ def unquote_plus(s) -> str:
     return unquote(s, _plus=True)
 
 
-def urlsplit(url:str, scheme='', allow_fragments=True) -> tuple:
+def _urlsplit(url: str, scheme='', allow_fragments=True) -> tuple:
     if not isinstance(url, str):
         raise TypeError('url must be a string')
     
@@ -193,7 +193,11 @@ def urlsplit(url:str, scheme='', allow_fragments=True) -> tuple:
     return (scheme, netloc, path, query, fragment)
 
 
-def netlocsplit(netloc:str) -> tuple: # extension
+def urlsplit(url: str, *args, **kwargs) -> tuple:
+    return _urlsplit(url, *args, **kwargs)
+
+
+def netlocsplit(netloc: str) -> tuple: # extension
     if not isinstance(netloc, str):
         raise TypeError('netloc must be a string')
     
@@ -244,8 +248,35 @@ def netlocsplit(netloc:str) -> tuple: # extension
     return (username, password, hostname, port)
 
 
-def netlocdict(netloc:str) -> dict: # extension
+def netlocdict(netloc: str) -> dict: # extension
     return dict(zip(('username', 'password', 'hostname', 'port'), netlocsplit(netloc)))
+
+
+#from collections import namedtuple
+#_SplitTuple = namedtuple('_SplitTuple', ('scheme', 'netloc', 'path', 'query', 'fragment'))
+#class SplitResult(_SplitTuple):
+#    @property
+#    def username(self):
+#        if not hasattr(self._netlocsplit):
+#            self._netlocsplit = netlocsplit(self.netloc)
+#        return self._netlocsplit[0]
+#    @property
+#    def password(self):
+#        if not hasattr(self._netlocsplit):
+#            self._netlocsplit = netlocsplit(self.netloc)
+#        return self._netlocsplit[1]
+#    @property
+#    def hostname(self):
+#        if not hasattr(self._netlocsplit):
+#            self._netlocsplit = netlocsplit(self.netloc)
+#        return self._netlocsplit[2]
+#    @property
+#    def port(self):
+#        if not hasattr(self._netlocsplit):
+#            self._netlocsplit = netlocsplit(self.netloc)
+#        return self._netlocsplit[3]
+#def urlsplit(url: str, *args, **kwargs) -> SplitResult:
+#    return SplitResult(*_urlsplit(url, *args, **kwargs))
 
 
 def urlunsplit(components: tuple) -> str:
@@ -302,7 +333,7 @@ def _normalize_path(path: str) -> str:
     return res
 
 
-def urljoin(base:str, url:str, allow_fragments=True) -> str:
+def urljoin(base: str, url: str, allow_fragments=True) -> str:
     if not isinstance(base, str):
         raise TypeError('base must be a string')
     if not isinstance(url, str):
@@ -368,7 +399,7 @@ def urlencode(query, *args, **kwargs) -> str:
     return '&'.join(_urlencode_generator(query, *args, **kwargs))
 
 
-def _parse_qs_generator(qs:str, keep_blank_values=False, strict_parsing=False, unquote_via=unquote_plus):
+def _parse_qs_generator(qs: str, keep_blank_values=False, strict_parsing=False, unquote_via=unquote_plus):
     if not qs:
         return
         
@@ -393,7 +424,7 @@ def _parse_qs_generator(qs:str, keep_blank_values=False, strict_parsing=False, u
             if keep_blank_values:
                 yield unquote_via(qs[i:j]), ''
 
-def parse_qs(qs:str, *args, **kwargs) -> dict:
+def parse_qs(qs: str, *args, **kwargs) -> dict:
     res = {}
     for key, val in _parse_qs_generator(qs, *args, **kwargs):
         if key in res:
@@ -402,10 +433,10 @@ def parse_qs(qs:str, *args, **kwargs) -> dict:
             res[key] = [val]
     return res
 
-def parse_qsl(qs:str, *args, **kwargs) -> list:
+def parse_qsl(qs: str, *args, **kwargs) -> list:
     return list(_parse_qs_generator(qs, *args, **kwargs))
 
-def urldecode(qs:str, *args, **kwargs) -> dict:
+def urldecode(qs: str, *args, **kwargs) -> dict:
     res = {}
     for key, val in _parse_qs_generator(qs, *args, **kwargs):
         res[key] = val

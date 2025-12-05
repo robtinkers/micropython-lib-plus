@@ -38,6 +38,7 @@ _SAFE_SET = frozenset([45, 46, 95, 126]) # -._~
 _SAFE_SET_WITH_SLASH = frozenset([45, 46, 95, 126, 47]) # -._~/
 
 
+#@micropython.native # loops could be viper with some work
 def quote(s, safe='/', *, _plus=False) -> str:
     if not s:
         return ''
@@ -99,6 +100,7 @@ def quote_plus(s, safe='') -> str:
     return quote(s, safe=safe, _plus=True)
 
 
+#@micropython.native # loops could be viper with some work
 def unquote(s, *, _plus=False) -> str:
     if not s:
         return ''
@@ -155,48 +157,6 @@ def unquote_plus(s) -> str:
     return unquote(s, _plus=True)
 
 
-def _urlsplit(url: str, scheme='', allow_fragments=True) -> tuple:
-    if not isinstance(url, str):
-        raise TypeError('url must be a string')
-    
-    if len(url) > 0 and ord(url[0]) <= 32:
-        url = url.lstrip() # CPython always does lstrip()
-    netloc = query = fragment = ''
-    if allow_fragments:
-        url, _, fragment = url.partition('#')
-    url, _, query = url.partition('?')
-    
-    if url.startswith('//'):
-        url = url[2:]
-        netloc, sep, path = url.partition('/')
-        if sep or path:
-             path = '/' + path
-    elif url.startswith('/'):
-        path = url
-    else:
-        colon = url.find(':')
-        slash = url.find('/')
-        # Scheme exists if colon is present and comes before any slash
-        if (colon > 0 and url[0].isalpha()) and (slash == -1 or slash > colon):
-            scheme = url[:colon].lower()
-            url = url[colon+1:]
-            if url.startswith('//'):
-                url = url[2:]
-                netloc, sep, path = url.partition('/')
-                if sep or path:
-                    path = '/' + path
-            else:
-                path = url
-        else:
-            path = url
-    
-    return (scheme, netloc, path, query, fragment)
-
-
-def urlsplit(url: str, *args, **kwargs) -> tuple:
-    return _urlsplit(url, *args, **kwargs)
-
-
 def netlocsplit(netloc: str) -> tuple: # extension
     if not isinstance(netloc, str):
         raise TypeError('netloc must be a string')
@@ -250,6 +210,48 @@ def netlocsplit(netloc: str) -> tuple: # extension
 
 def netlocdict(netloc: str) -> dict: # extension
     return dict(zip(('username', 'password', 'hostname', 'port'), netlocsplit(netloc)))
+
+
+def _urlsplit(url: str, scheme='', allow_fragments=True) -> tuple:
+    if not isinstance(url, str):
+        raise TypeError('url must be a string')
+    
+    if len(url) > 0 and ord(url[0]) <= 32:
+        url = url.lstrip() # CPython always does lstrip()
+    netloc = query = fragment = ''
+    if allow_fragments:
+        url, _, fragment = url.partition('#')
+    url, _, query = url.partition('?')
+    
+    if url.startswith('//'):
+        url = url[2:]
+        netloc, sep, path = url.partition('/')
+        if sep or path:
+             path = '/' + path
+    elif url.startswith('/'):
+        path = url
+    else:
+        colon = url.find(':')
+        slash = url.find('/')
+        # Scheme exists if colon is present and comes before any slash
+        if (colon > 0 and url[0].isalpha()) and (slash == -1 or slash > colon):
+            scheme = url[:colon].lower()
+            url = url[colon+1:]
+            if url.startswith('//'):
+                url = url[2:]
+                netloc, sep, path = url.partition('/')
+                if sep or path:
+                    path = '/' + path
+            else:
+                path = url
+        else:
+            path = url
+    
+    return (scheme, netloc, path, query, fragment)
+
+
+def urlsplit(url: str, *args, **kwargs) -> tuple:
+    return _urlsplit(url, *args, **kwargs)
 
 
 #from collections import namedtuple

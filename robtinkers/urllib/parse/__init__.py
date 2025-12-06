@@ -433,7 +433,7 @@ def urlencode(query, *args, **kwargs) -> str:
     return '&'.join(_urlencode_generator(query, *args, **kwargs))
 
 
-def _parse_qs_generator(qs: str, keep_blank_values=False, strict_parsing=False, unquote_via=unquote_plus):
+def _parse_generator(qs: str, keep_blank_values=False, strict_parsing=False, unquote_via=unquote_plus):
     if not qs:
         return
         
@@ -459,7 +459,7 @@ def _parse_qs_generator(qs: str, keep_blank_values=False, strict_parsing=False, 
 
 def parse_qs(qs: str, *args, **kwargs) -> dict:
     res = {}
-    for key, val in _parse_qs_generator(qs, *args, **kwargs):
+    for key, val in _parse_generator(qs, *args, **kwargs):
         if key in res:
             res[key].append(val)
         else:
@@ -467,11 +467,11 @@ def parse_qs(qs: str, *args, **kwargs) -> dict:
     return res
 
 def parse_qsl(qs: str, *args, **kwargs) -> list:
-    return list(_parse_qs_generator(qs, *args, **kwargs))
+    return list(_parse_generator(qs, *args, **kwargs))
 
 def urldecode(qs: str, *args, **kwargs) -> dict:
     res = {}
-    for key, val in _parse_qs_generator(qs, *args, **kwargs):
+    for key, val in _parse_generator(qs, *args, **kwargs):
         res[key] = val
     return res
 

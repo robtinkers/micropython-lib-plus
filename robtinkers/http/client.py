@@ -37,8 +37,7 @@ def _create_connection(address, timeout=None):
     else:
         raise err
 
-def _parse_status(fp):
-    line = fp.readline()
+def _parse_status(line):
     if not line:
         raise RemoteDisconnected()
     
@@ -74,8 +73,8 @@ def _parse_headers_and_cookies(fp, header_filter, cookie_filter):
     last_header = None
     
     while True:
-        line = fp.readline().rstrip(b'\r\n')
-        if not line:
+        line = fp.readline()
+        if not line.rstrip(b'\r\n'):
             return headers, cookies
         
         try:
@@ -119,7 +118,7 @@ def _parse_headers_and_cookies(fp, header_filter, cookie_filter):
 class HTTPResponse:
     def __init__(self, sock, debuglevel=0, method=None, url=None):
         self.fp = sock
-#        self.debuglevel = debuglevel # unused
+        self.debuglevel = debuglevel
         self._method = method
         self.url = url
         
@@ -151,7 +150,10 @@ class HTTPResponse:
         # read until we get a non-100 response
         while True:
             try:
-                version, status, reason = _parse_status(self.fp)
+                status_line = self.fp.readline()
+                if self.debuglevel > 0:
+                    print("reply:", repr(status_line))
+                version, status, reason = _parse_status(status_line)
             except Exception as e:
                 self.close()
                 raise e
@@ -159,8 +161,10 @@ class HTTPResponse:
                 break
             # skip the header from the 100 response
             while True:
-                line = self.fp.readline().rstrip(b'\r\n')
-                if not line:
+                line = self.fp.readline()
+                if self.debuglevel > 0:
+                    print("skipping:", repr(line))
+                if not line.rstrip(b'\r\n'):
                     break
         
         self.status = status
@@ -174,6 +178,11 @@ class HTTPResponse:
             raise UnknownProtocol()
         
         self.headers, self.cookies = _parse_headers_and_cookies(self.fp, self.header_filter, self.cookie_filter)
+        if self.debuglevel > 0:
+            for hdr, val in self.headers.items():
+                print("header:", hdr + ":", val)
+            for hdr, val in self.cookies.items():
+                print("cookie:", hdr + ":", val)
         
         # are we using the chunked-style of transfer encoding?
         if "chunked" in self.headers.get("transfer-encoding", "").lower():
@@ -348,7 +357,7 @@ class HTTPConnection:
     response_class = HTTPResponse
     default_port = HTTP_PORT
     auto_open = 1
-#    debuglevel = 0 # unused
+    debuglevel = 0
     
     def __init__(self, host, port=None, timeout=None, *, blocksize=1024):
         self.timeout = timeout
@@ -366,8 +375,8 @@ class HTTPConnection:
             self.host = host
             self.port = port
     
-#    def set_debuglevel(self, level):
-#        self.debuglevel = level
+    def set_debuglevel(self, level):
+        self.debuglevel = level
     
     def __enter__(self):
         return self
@@ -405,6 +414,8 @@ class HTTPConnection:
         
         if isinstance(data, str):
             data = data.encode(ENCODE_BODY)
+        if self.debuglevel > 0:
+            print("send:", repr(data))
         
         if data is None:
             pass
@@ -416,9 +427,13 @@ class HTTPConnection:
                 if encode_chunked:
                     self.sock.sendall(b'\r\n')
         elif hasattr(data, 'read'):
+            if self.debuglevel > 0:
+                print("sending a readable")
             while True:
                 d = data.read(self.blocksize) # no short reads on micropython
                 if isinstance(d, str):
+                    if self.debuglevel > 0:
+                        print("encoding file")
                     d = d.encode(ENCODE_BODY)
                 if not d:
                     break
@@ -432,19 +447,21 @@ class HTTPConnection:
                 if isinstance(d, str):
                     d = d.encode(ENCODE_BODY)
                 if d is None:
+                    if self.debuglevel > 0:
+                        print('Zero length chunk ignored')
                     continue
                 elif isinstance(d, (bytes, bytearray, memoryview)):
                     if not d:
                         continue
                 else:
-                    raise TypeError(f"data has unexpected type {type(d)}")
+                    raise TypeError(f"unexpected data {type(d)}")
                 if encode_chunked:
                     self.sock.sendall(f"{len(d):X}\r\n".encode(None)) # ascii
                 self.sock.sendall(d)
                 if encode_chunked:
                     self.sock.sendall(b'\r\n')
         else:
-            raise TypeError(f"data has unexpected type {type(data)}")
+            raise TypeError(f"unexpected data {type(data)}")
     
     def send_terminating_chunk(self, headers=None):
         if headers is None:
@@ -547,6 +564,8 @@ class HTTPConnection:
                 
                 if content_length is None:
                     if body is not None:
+                        if self.debuglevel > 0:
+                            print('Unable to determine size of %r' % body)
                         encode_chunked = True
                         self.putheader('Transfer-Encoding', 'chunked')
                 else:
@@ -565,7 +584,7 @@ class HTTPConnection:
         if self.__state != _CS_REQ_SENT or self.__response:
             raise ResponseNotReady(self.__state)
         
-        response = self.response_class(self.sock, method=self._method)
+        response = self.response_class(self.sock, self.debuglevel, self._method)
         
         try:
             try:

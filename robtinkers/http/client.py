@@ -417,7 +417,7 @@ class HTTPConnection:
                 d = data.read(self.blocksize) # no short reads on micropython
                 if isinstance(d, str):
                     d = d.encode() # utf-8
-                if d == b'':
+                if not d:
                     break
                 if encode_chunked:
                     self.sock.sendall(f'{len(d):X}\r\n'.encode()) # ascii

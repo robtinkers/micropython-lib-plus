@@ -3,6 +3,11 @@ import socket
 HTTP_PORT = const(80)
 HTTPS_PORT = const(443)
 
+DECODE_HEAD = const(None)
+DECODE_BODY = const(None)
+ENCODE_HEAD = const(None)
+ENCODE_BODY = const(None)
+
 _CS_IDLE = const(1) # 'Idle'
 _CS_REQ_STARTED = const(2) # 'Request-started'
 _CS_REQ_SENT = const(3) # 'Request-sent'
@@ -38,7 +43,7 @@ def _parse_status(fp):
         raise RemoteDisconnected()
     
     try:
-        line = line.decode().strip() # iso-8859-1
+        line = line.decode(DECODE_HEAD).strip()
         version, status, reason = line.split(None, 2)
     except UnicodeError:
         # empty version will cause next test to fail.
@@ -74,7 +79,7 @@ def _parse_headers_and_cookies(fp, header_filter, cookie_filter):
             return headers, cookies
         
         try:
-            line = line.decode() # iso-8859-1
+            line = line.decode(DECODE_HEAD)
         except UnicodeError:
             last_header = None
             continue
@@ -399,14 +404,14 @@ class HTTPConnection:
                 raise NotConnected()
         
         if isinstance(data, str):
-            data = data.encode() # utf-8
+            data = data.encode(ENCODE_BODY)
         
         if data is None:
             pass
         elif isinstance(data, (bytes, bytearray, memoryview)):
             if data:
                 if encode_chunked:
-                    self.sock.sendall(f"{len(data):X}\r\n".encode()) # ascii
+                    self.sock.sendall(f"{len(data):X}\r\n".encode(None)) # ascii
                 self.sock.sendall(data)
                 if encode_chunked:
                     self.sock.sendall(b'\r\n')
@@ -414,18 +419,18 @@ class HTTPConnection:
             while True:
                 d = data.read(self.blocksize) # no short reads on micropython
                 if isinstance(d, str):
-                    d = d.encode() # utf-8
+                    d = d.encode(ENCODE_BODY)
                 if not d:
                     break
                 if encode_chunked:
-                    self.sock.sendall(f"{len(d):X}\r\n".encode()) # ascii
+                    self.sock.sendall(f"{len(d):X}\r\n".encode(None)) # ascii
                 self.sock.sendall(d)
                 if encode_chunked:
                     self.sock.sendall(b'\r\n')
         elif hasattr(data, '__next__'):
             for d in data:
                 if isinstance(d, str):
-                    d = d.encode() # utf-8
+                    d = d.encode(ENCODE_BODY)
                 if d is None:
                     continue
                 elif isinstance(d, (bytes, bytearray, memoryview)):
@@ -434,25 +439,23 @@ class HTTPConnection:
                 else:
                     raise TypeError(f"data has unexpected type {type(d)}")
                 if encode_chunked:
-                    self.sock.sendall(f"{len(d):X}\r\n".encode()) # ascii
+                    self.sock.sendall(f"{len(d):X}\r\n".encode(None)) # ascii
                 self.sock.sendall(d)
                 if encode_chunked:
                     self.sock.sendall(b'\r\n')
         else:
             raise TypeError(f"data has unexpected type {type(data)}")
     
-    def send_terminating_chunk(self):
-        self.sock.sendall(b'0\r\n\r\n')
-    
-#    def send_terminating_chunk(self, trailing_headers=None):
-#        if trailing_headers is None:
-#            self.sock.sendall(b'0\r\n\r\n')
-#            return
-#        
-#        self.sock.sendall(b'0\r\n')
-#        for x in trailing_headers:
-#            self.sock.sendall(('%s: %s\r\n' % (x[0], '\r\n\t'.join((str(v) for v in x[1:])))).encode()) # utf-8
-#        self.sock.sendall(b'\r\n')
+    def send_terminating_chunk(self, headers=None):
+        if headers is None:
+            self.sock.sendall(b'0\r\n\r\n')
+            return
+        
+        self.sock.sendall(b'0\r\n')
+        for h in headers:
+            hdr = '%s: %s\r\n' % (str(h[0], ENCODE_BODY), '\r\n\t'.join([str(v, ENCODE_BODY) for v in h[1:]]))
+            self.sock.sendall(hdr.encode(ENCODE_BODY))
+        self.sock.sendall(b'\r\n')
     
     def putrequest(self, method, url, skip_host=False, skip_accept_encoding=False):
         if self.__state == _CS_IDLE:
@@ -464,7 +467,7 @@ class HTTPConnection:
         url = url or '/'
         
         request = '%s %s %s' % (method, url, 'HTTP/1.1')
-        self._buffer.append(request.encode()) # iso-8859-1
+        self._buffer.append(request.encode(ENCODE_HEAD))
         
         # Issue some standard headers for better HTTP/1.1 compliance
         if not skip_host:
@@ -476,8 +479,8 @@ class HTTPConnection:
         if self.__state != _CS_REQ_STARTED:
             raise CannotSendHeader()
         
-        hdr = '%s: %s' % (header, '\r\n\t'.join([str(v) for v in values]))
-        self._buffer.append(hdr.encode()) # iso-8859-1
+        hdr = '%s: %s' % (str(header, ENCODE_HEAD), '\r\n\t'.join([str(v, ENCODE_HEAD) for v in values]))
+        self._buffer.append(hdr.encode(ENCODE_HEAD))
     
     def endheaders(self, message_body=None, *, encode_chunked=False):
         if self.__state == _CS_REQ_STARTED:
@@ -502,7 +505,7 @@ class HTTPConnection:
             headers = {}
         
         if isinstance(body, str):
-            body = body.encode() # utf-8
+            body = body.encode(ENCODE_BODY)
         
         # Honor explicitly requested Host: and Accept-Encoding: headers.
         header_names = frozenset(k.lower() for k in headers)

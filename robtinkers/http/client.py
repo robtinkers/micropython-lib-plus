@@ -100,11 +100,7 @@ def _parse_headers_and_cookies(fp, header_filter, cookie_filter):
         if key == 'set-cookie':
             key, x, v = val.partition('=')
             if x and cookie_filter(key, v):
-                if v.startswith('"'):
-                    x = v.find('"', 1)
-                    cookies[key] = v[1:x] if x > 0 else v[1:]
-                else:
-                    cookies[key] = v.split(';', 1)[0]
+                cookies[key] = v.split(';', 1)[0] # includes surrounding quotes, if any
             last_header = None  # multi-line set-cookie headers not supported
         else:
             if header_filter(key, val):
@@ -364,6 +360,11 @@ class HTTPResponse:
             raise ResponseNotReady()
         return self.cookies.get(name, default)
     
+    def getcookies(self):
+        if self.cookies is None:
+            raise ResponseNotReady()
+        return self.cookies.items()
+    
     def getheader(self, name, default=None):
         if self.headers is None:
             raise ResponseNotReady()
@@ -372,7 +373,7 @@ class HTTPResponse:
     def getheaders(self):
         if self.headers is None:
             raise ResponseNotReady()
-        return list(self.headers.items())
+        return self.headers.items()
 
 class HTTPConnection:
     response_class = HTTPResponse
@@ -389,12 +390,8 @@ class HTTPConnection:
         self.__state = _CS_IDLE
         self._method = None
         
-        if port is None:
-            self.host = host
-            self.port = self.default_port
-        else:
-            self.host = host
-            self.port = port
+        self.host = host
+        self.port = self.default_port if port is None else port
     
     def set_debuglevel(self, level):
         self.debuglevel = level
@@ -522,6 +519,10 @@ class HTTPConnection:
         hdr = '%s: %s' % (str(header, ENCODE_HEAD), '\r\n\t'.join([str(v, ENCODE_HEAD) for v in values]))
         self._buffer.append(hdr.encode(ENCODE_HEAD))
     
+    def putcookies(self, cookies):
+        # Note: multiple Cookie headers aren't RFC-compliant
+        self.putheader('Cookie', '; '.join(((str(key, ENCODE_HEAD) + '=' + str(val, ENCODE_HEAD)) for key, val in cookies)))
+    
     def endheaders(self, message_body=None, *, encode_chunked=False):
         if self.__state == _CS_REQ_STARTED:
             self.__state = _CS_REQ_SENT
@@ -536,11 +537,10 @@ class HTTPConnection:
         if message_body is not None:
             self.send(message_body, encode_chunked=encode_chunked)
             if encode_chunked:
-                # Send the terminating chunk
                 self.send_terminating_chunk()
     
     def request(self, method, url, body=None, headers=None, *,
-                encode_chunked=False):
+                cookies=None, encode_chunked=False): # cookies is an extension
         if headers is None:
             headers = {}
         
@@ -598,6 +598,8 @@ class HTTPConnection:
         
         for hdr, value in headers.items():
             self.putheader(hdr, value)
+        if cookies is not None:
+            self.putcookies(cookies)
         self.endheaders(body, encode_chunked=encode_chunked)
     
     def getresponse(self):

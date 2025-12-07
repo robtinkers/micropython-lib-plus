@@ -92,26 +92,24 @@ def _parse_headers_and_cookies(fp, header_filter, cookie_filter):
         val = val.strip()
         
         if key == 'set-cookie':
-            key, x, val = val.partition('=')
-            if not cookie_filter(key, val):
-                pass
-            elif not x:
-                pass
-            elif val.startswith('"'):
-                x = val.find('"', 1)
-                cookies[key] = val[1:x] if x > 0 else val[1:]
-            else:
-                cookies[key] = val.split(';', 1)[0]
+            key, x, v = val.partition('=')
+            if x and cookie_filter(key, v):
+                if v.startswith('"'):
+                    x = v.find('"', 1)
+                    cookies[key] = v[1:x] if x > 0 else v[1:]
+                else:
+                    cookies[key] = v.split(';', 1)[0]
             last_header = None  # multi-line set-cookie headers not supported
         else:
-            if not header_filter(key, val):
-                last_header = None
-            elif key in headers:
-                headers[key] += ', ' + val
-                last_header = key
+            if header_filter(key, val):
+                if key in headers:
+                    headers[key] += ', ' + val
+                    last_header = key
+                else:
+                    headers[key] = val
+                    last_header = key
             else:
-                headers[key] = val
-                last_header = key
+                last_header = None
 
 class HTTPResponse:
     def __init__(self, sock, debuglevel=0, method=None, url=None):
@@ -408,7 +406,7 @@ class HTTPConnection:
         elif isinstance(data, (bytes, bytearray, memoryview)):
             if data:
                 if encode_chunked:
-                    self.sock.sendall(f'{len(data):X}\r\n'.encode()) # ascii
+                    self.sock.sendall(f"{len(data):X}\r\n".encode()) # ascii
                 self.sock.sendall(data)
                 if encode_chunked:
                     self.sock.sendall(b'\r\n')
@@ -420,7 +418,7 @@ class HTTPConnection:
                 if not d:
                     break
                 if encode_chunked:
-                    self.sock.sendall(f'{len(d):X}\r\n'.encode()) # ascii
+                    self.sock.sendall(f"{len(d):X}\r\n".encode()) # ascii
                 self.sock.sendall(d)
                 if encode_chunked:
                     self.sock.sendall(b'\r\n')
@@ -436,7 +434,7 @@ class HTTPConnection:
                 else:
                     raise TypeError(f"data has unexpected type {type(d)}")
                 if encode_chunked:
-                    self.sock.sendall(f'{len(d):X}\r\n'.encode()) # ascii
+                    self.sock.sendall(f"{len(d):X}\r\n".encode()) # ascii
                 self.sock.sendall(d)
                 if encode_chunked:
                     self.sock.sendall(b'\r\n')
@@ -444,7 +442,17 @@ class HTTPConnection:
             raise TypeError(f"data has unexpected type {type(data)}")
     
     def send_terminating_chunk(self):
-                self.send(b'0\r\n\r\n')
+        self.sock.sendall(b'0\r\n\r\n')
+    
+#    def send_terminating_chunk(self, trailing_headers=None):
+#        if trailing_headers is None:
+#            self.sock.sendall(b'0\r\n\r\n')
+#            return
+#        
+#        self.sock.sendall(b'0\r\n')
+#        for x in trailing_headers:
+#            self.sock.sendall(('%s: %s\r\n' % (x[0], '\r\n\t'.join((str(v) for v in x[1:])))).encode()) # utf-8
+#        self.sock.sendall(b'\r\n')
     
     def putrequest(self, method, url, skip_host=False, skip_accept_encoding=False):
         if self.__state == _CS_IDLE:

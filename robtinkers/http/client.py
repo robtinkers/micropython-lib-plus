@@ -662,7 +662,7 @@ class NotConnected(HTTPException): pass
 class UnknownProtocol(HTTPException): pass
 #class UnknownTransferEncoding(HTTPException): pass
 #class UnimplementedFileMode(HTTPException): pass
-class IncompleteRead(HTTPException): pass
+#class IncompleteRead(HTTPException): pass
 class ImproperConnectionState(HTTPException): pass
 class CannotSendRequest(ImproperConnectionState): pass
 class CannotSendHeader(ImproperConnectionState): pass

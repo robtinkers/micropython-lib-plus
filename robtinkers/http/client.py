@@ -406,15 +406,18 @@ class HTTPConnection:
         if data is None:
             pass
         elif isinstance(data, (bytes, bytearray, memoryview)):
-            if encode_chunked:
-                self.sock.sendall(f'{len(data):X}\r\n'.encode()) # ascii
-            self.sock.sendall(data)
-            if encode_chunked:
-                self.sock.sendall(b'\r\n')
+            if data:
+                if encode_chunked:
+                    self.sock.sendall(f'{len(data):X}\r\n'.encode()) # ascii
+                self.sock.sendall(data)
+                if encode_chunked:
+                    self.sock.sendall(b'\r\n')
         elif hasattr(data, 'read'):
             while True:
                 d = data.read(self.blocksize) # no short reads on micropython
-                if not d:
+                if isinstance(d, str):
+                    d = d.encode() # utf-8
+                if d == b'':
                     break
                 if encode_chunked:
                     self.sock.sendall(f'{len(d):X}\r\n'.encode()) # ascii
@@ -428,7 +431,7 @@ class HTTPConnection:
                 if d is None:
                     continue
                 elif isinstance(d, (bytes, bytearray, memoryview)):
-                    if not d:
+                    if d == b'':
                         continue
                 else:
                     raise TypeError(f"data has unexpected type {type(d)}")
@@ -439,6 +442,9 @@ class HTTPConnection:
                     self.sock.sendall(b'\r\n')
         else:
             raise TypeError(f"data has unexpected type {type(data)}")
+    
+    def send_terminating_chunk(self):
+                self.send(b'0\r\n\r\n')
     
     def putrequest(self, method, url, skip_host=False, skip_accept_encoding=False):
         if self.__state == _CS_IDLE:
@@ -480,7 +486,7 @@ class HTTPConnection:
             self.send(message_body, encode_chunked=encode_chunked)
             if encode_chunked:
                 # Send the terminating chunk
-                self.send(b'', encode_chunked=encode_chunked)
+                self.send_terminating_chunk()
     
     def request(self, method, url, body=None, headers=None, *,
                 encode_chunked=False):

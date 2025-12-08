@@ -66,15 +66,14 @@ def request(method, url, data=None, *, json=None, params=None, headers=None, coo
     else:
         redirects = int(redirects)
     
-    # 1. Handle JSON Convenience
+    # Handle json
     if data is None and json is not None:
         data = ujson.dumps(json)
         if 'Content-Type' not in headers:
             headers = headers.copy()
             headers['Content-Type'] = 'application/json'
     
-    # 2. Update url (strip fragment and add params)
-    
+    # Update url (strip fragment and add params)
     url = url.split('#', 1)[0]
     if params:
         url += ('&' if '?' in url else '?') + urlencode(params)
@@ -83,11 +82,11 @@ def request(method, url, data=None, *, json=None, params=None, headers=None, coo
         # Prepare headers for this specific loop iteration
         req_headers = headers.copy()
         
-        # 3. Parse url
+        # Parse url
         scheme, netloc, path, query, _ = urlsplit(url)
         username, password, host, port = netlocsplit(netloc)
         
-        # 4. Determine Protocol and Port
+        # Determine Protocol and Port
         if scheme == 'https':
             conn_class = http.client.HTTPSConnection
         elif scheme == 'http':
@@ -95,7 +94,7 @@ def request(method, url, data=None, *, json=None, params=None, headers=None, coo
         else:
             raise ValueError("Unsupported protocol: " + scheme)
         
-        # 5. Handle Auth
+        # Handle Auth
         if username is not None:
             if password is not None:
                 credentials = f"{username}:{password}"
@@ -110,20 +109,20 @@ def request(method, url, data=None, *, json=None, params=None, headers=None, coo
             auth_b64 = b2a_base64(credentials.encode('utf-8')).strip()
             req_headers['Authorization'] = b'Basic ' + auth_b64
         
-        # 6. Send Request
-        # We pass cookies.items() because your http.client iterates via 'for k, v in cookies'
+        # Create Request
         conn = conn_class(host, port=port, timeout=timeout)
         
+        # Send Request
         conn.request(method, path, body=data, headers=req_headers, cookies=cookies.items())
         
-        # 7. Get Response
+        # Get Response
         resp = Response(conn.getresponse())
         
-        # 8. Update Cookie Jar
+        # Update Cookie Jar
         if resp.cookies:
             cookies.update(resp.cookies)
         
-        # 9. Check for Redirects
+        # Check for Redirects
         if redirects > 0 and resp.status_code in [301, 302, 303, 307, 308]:
             location = resp.raw.getheader('Location')
             

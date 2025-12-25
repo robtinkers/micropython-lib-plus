@@ -23,7 +23,7 @@ _IMPORTANT_HEADERS = frozenset({
     b'content-type',
     b'etag',
     b'keep-alive', # required
-    b'location', # required-ish
+    b'location', # required
     b'retry-after',
     b'transfer-encoding', # required
     b'www-authenticate',

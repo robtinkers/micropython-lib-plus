@@ -180,13 +180,14 @@ class HTTPResponse:
             
             try:
                 line = line.decode(DECODE_HEAD).strip()
-                try:
-                    version, status, reason = line.split(None, 2)
-                    reason = reason.strip()
-                except ValueError:
-                    version, status = line.split(None, 1)
+                line = line.split(None, 2)
+                if len(line) == 3:
+                    version, status, reason = line
+                elif len(line) == 2:
+                    version, status = line
                     reason = ''
-                
+                else:
+                    raise BadStatusLine()
                 status = int(status, 10)
             except (UnicodeError, ValueError):
                 raise BadStatusLine()
@@ -368,7 +369,10 @@ class HTTPResponse:
         return self.headers.items()
     
     def getcookie(self, name, default=None):
-        return self.cookies.get(name, default)
+        if name in self.cookies:
+            return self.cookies[name].split(';', 1)[0]
+        else:
+            return default
     
     def getcookies(self):
         return self.cookies.items()

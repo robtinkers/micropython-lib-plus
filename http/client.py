@@ -5,9 +5,9 @@ import socket
 HTTP_PORT = const(80)
 HTTPS_PORT = const(443)
 
-DECODE_HEAD = const('iso-8859-1')
+DECODE_HEAD = const('ascii')
 DECODE_BODY = const('utf-8')
-ENCODE_HEAD = const('iso-8859-1')
+ENCODE_HEAD = const('ascii')
 ENCODE_BODY = const('utf-8')
 
 OK = const(200)
@@ -595,14 +595,7 @@ class HTTPConnection:
         if encode_chunked:
             if self.debuglevel > 0:
                 print('send: terminating chunk')
-            self._sendall(b'0\r\n')
-            for h in headers:
-                self._sendall(('%s: %s\r\n' % (
-                        stringify(h[0], DECODE_BODY),
-                        '\r\n\t'.join([stringify(v, DECODE_BODY) for v in h[1:]])
-                    )).encode(ENCODE_BODY)
-                )
-            self._sendall(b'\r\n')
+            self._sendall(b'0\r\n\r\n')
     
     def getresponse(self, all_headers=False, set_cookies=False):
         try:

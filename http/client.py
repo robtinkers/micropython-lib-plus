@@ -5,10 +5,10 @@ import socket
 HTTP_PORT = const(80)
 HTTPS_PORT = const(443)
 
-DECODE_HEAD = const(None)
-DECODE_BODY = const(None)
-ENCODE_HEAD = const(None)
-ENCODE_BODY = const(None)
+DECODE_HEAD = const('iso-8859-1')
+DECODE_BODY = const('utf-8')
+ENCODE_HEAD = const('iso-8859-1')
+ENCODE_BODY = const('utf-8')
 
 OK = const(200)
 
@@ -21,10 +21,12 @@ _CRITICAL_HEADERS = frozenset({
     b'content-encoding',
     b'content-length',
     b'content-type',
+    b'etag',
     b'keep-alive',
     b'location',
     b'retry-after',
     b'transfer-encoding',
+    b'www-authenticate',
 })
 
 def stringify(s, *args):
@@ -62,7 +64,7 @@ def create_connection(address, timeout=None):
                 sock.close()
     raise OSError("create_connection() failed")
 
-def parse_headers(sock, *, all_headers=True, set_cookies=None):
+def parse_headers(sock, *, all_headers=False, set_cookies=None):
     headers = {}
     if set_cookies is not None:
         cookies = {}
@@ -110,7 +112,7 @@ def parse_headers(sock, *, all_headers=True, set_cookies=None):
         last_header = None
 
 class HTTPResponse:
-    def __init__(self, sock, debuglevel=0, method=None, url=None, *, all_headers=True, set_cookies=False):
+    def __init__(self, sock, debuglevel=0, method=None, url=None, *, all_headers=False, set_cookies=False):
         self._sock = sock
         self.debuglevel = debuglevel
         self._method = method
@@ -376,13 +378,11 @@ class HTTPConnection:
     auto_open = 1
     debuglevel = 0
     
-    def __init__(self, host, port=None, timeout=None, *, blocksize=1024, all_headers=False, set_cookies=False):
+    def __init__(self, host, port=None, timeout=None, blocksize=1024):
         self.host = host
         self.port = self.default_port if port is None else port
         self.timeout = timeout
         self.blocksize = blocksize
-        self._all_headers = all_headers
-        self._set_cookies = set_cookies
         
         self._sock = None
         self._method = None
@@ -604,9 +604,9 @@ class HTTPConnection:
                 )
             self._sendall(b'\r\n')
     
-    def getresponse(self):
+    def getresponse(self, all_headers=False, set_cookies=False):
         try:
-            self._response = HTTPResponse(self._sock, self.debuglevel, self._method, self._url, all_headers=self._all_headers, set_cookies=self._set_cookies)
+            self._response = HTTPResponse(self._sock, self.debuglevel, self._method, self._url, all_headers=all_headers, set_cookies=set_cookies)
             return self._response
         except Exception:
             self._close()

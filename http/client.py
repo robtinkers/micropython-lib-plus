@@ -35,6 +35,13 @@ def stringify(s, *args):
     else:
         return str(s)
 
+def isiterator(x):
+    try:
+        iter(x)
+        return True
+    except TypeError:
+        return False
+
 def create_connection(address, timeout=None):
     host, port = address
     for f, t, p, n, a in socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM):
@@ -113,7 +120,7 @@ class HTTPResponse:
         if self.debuglevel > 0:
             print(f"status: {self.version!r} {self.status!r} {self.reason!r}")
         
-        self.headers, self.cookies = parse_headers(all_headers=all_headers, set_cookies=set_cookies)
+        self.headers, self.cookies = parse_headers(self._sock, all_headers=all_headers, set_cookies=set_cookies)
         if self.debuglevel > 0:
             for key, val in self.headers.items():
                 print(f"header: {key!r} = {val!r}")
@@ -562,7 +569,7 @@ class HTTPConnection:
                 self._sendall(d)
                 if encode_chunked:
                     self._sendall(b'\r\n')
-        elif hasattr(data, '__next__'):
+        elif isiterator(data):  # includes generators (bytes-like was handled earlier)
             for d in data:
                 if isinstance(d, str):
                     d = d.encode(ENCODE_BODY)
@@ -626,7 +633,7 @@ else:
         def connect(self):
             super().connect()
             if self._context is None:
-                self._sock = ssl.wrap_socket(self._sock)
+                self._sock = ssl.wrap_socket(self._sock, server_hostname=self.host)
             else:
                 self._sock = self._context.wrap_socket(self._sock, server_hostname=self.host)
 

@@ -1,9 +1,5 @@
 # http/client.py
 
-#TODO:
-# self.headers should be a dict of str to bytes
-# self.cookies should be a dict of str to bytes
-
 from micropython import const
 import socket
 

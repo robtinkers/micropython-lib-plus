@@ -60,7 +60,7 @@ def create_connection(address, timeout=None):
                 sock.close()
     raise OSError('create_connection() failed')
 
-def parse_headers(sock, *, all_headers=False, and_cookies=None):
+def parse_headers(sock, *, more_headers=False, and_cookies=None):
     headers = {}
     if and_cookies is not None:
         cookies = {}
@@ -92,7 +92,9 @@ def parse_headers(sock, *, all_headers=False, and_cookies=None):
                     if sep:
                         key = key.decode(DECODE_HEAD)
                         cookies[key] = val # includes any quotes and parameters
-            elif all_headers == True or key in _IMPORTANT_HEADERS:
+            elif more_headers == True \
+                    or (isinstance(more_headers, (frozenset, set, list, tuple, dict)) and key in more_headers) \
+                    or key in _IMPORTANT_HEADERS:
                 key = key.decode(DECODE_HEAD)
                 if key in headers:
                     headers[key] += b', ' + val
@@ -106,7 +108,7 @@ def parse_headers(sock, *, all_headers=False, and_cookies=None):
         last_header = None
 
 class HTTPResponse:
-    def __init__(self, sock, debuglevel=0, method=None, url=None, *, all_headers=False, set_cookies=False):
+    def __init__(self, sock, debuglevel=0, method=None, url=None, *, more_headers=False, set_cookies=False):
         self._sock = sock
         self.debuglevel = debuglevel
         self._method = method
@@ -116,7 +118,7 @@ class HTTPResponse:
         if self.debuglevel > 0:
             print('status:', repr(self.version), repr(self.status), repr(self.reason))
         
-        self.headers, self.cookies = parse_headers(self._sock, all_headers=all_headers, and_cookies=bool(set_cookies))
+        self.headers, self.cookies = parse_headers(self._sock, more_headers=more_headers, and_cookies=bool(set_cookies))
         if self.debuglevel > 0:
             for key, val in self.headers.items():
                 print('header:', repr(key), '=', repr(val))
@@ -652,9 +654,9 @@ class HTTPConnection:
                 print('send: terminating chunk')
             self._sendall(b'0\r\n\r\n')
     
-    def getresponse(self, all_headers=False, set_cookies=False):
+    def getresponse(self, more_headers=False, set_cookies=False):
         try:
-            self._response = HTTPResponse(self._sock, self.debuglevel, self._method, self._url, all_headers=all_headers, set_cookies=set_cookies)
+            self._response = HTTPResponse(self._sock, self.debuglevel, self._method, self._url, more_headers=more_headers, set_cookies=set_cookies)
             return self._response
         except Exception:
             self._close()

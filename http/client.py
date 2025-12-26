@@ -97,9 +97,9 @@ def parse_headers(sock, *, extra_headers=False, parse_cookies=None): # returns d
             
             if key == b'set-cookie':
                 if parse_cookies == True:
-                    sep = val.find(b'=')
-                    if sep != -1:
-                        cookies[val[:sep]] = val[sep+1:] # includes any quotes and parameters
+                    x = val.find(b'=')
+                    if x != -1:
+                        cookies[val[:x]] = val[x+1:] # includes any quotes and parameters
             elif extra_headers == True or key in _IMPORTANT_HEADERS \
                     or (isinstance(extra_headers, (frozenset, set, list, tuple)) and key in extra_headers):
                 if key in headers:
@@ -277,9 +277,9 @@ class HTTPResponse:
                     break
                 
                 # Strip chunk extensions
-                i = line.find(b';')
-                if i >= 0:
-                    line = line[:i]
+                x = line.find(b';')
+                if x != -1:
+                    line = line[:x]
                 
                 try:
                     self.chunk_left = int(line.strip(), 16)
@@ -407,9 +407,9 @@ class HTTPResponse:
             name = name.encode(_ENCODE_HEAD)
         if name in self.cookies:
             value = self.cookies[name]
-            sep = value.find(b';')
-            if sep != -1:
-                value = value[:sep]
+            x = value.find(b';')
+            if x != -1:
+                value = value[:x]
             value = value.decode(_DECODE_HEAD)
             return value
         else:

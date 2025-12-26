@@ -60,16 +60,16 @@ def create_connection(address, timeout=None):
                 sock.close()
     raise OSError('create_connection() failed')
 
-def parse_headers(sock, *, more_headers=False, and_cookies=None):
+def parse_headers(sock, *, more_headers=False, with_cookies=None):
     headers = {}
-    if and_cookies is not None:
+    if with_cookies is not None:
         cookies = {}
     last_header = None
     
     while True:
         line = sock.readline()
         if not line or line == b'\r\n':
-            if and_cookies is not None:
+            if with_cookies is not None:
                 return headers, cookies
             else:
                 return headers
@@ -87,7 +87,7 @@ def parse_headers(sock, *, more_headers=False, and_cookies=None):
             val = line[x+1:].strip()
             
             if key == b'set-cookie':
-                if and_cookies == True:
+                if with_cookies == True:
                     key, sep, val = val.partition(b'=')
                     if sep:
                         key = key.decode(DECODE_HEAD)
@@ -118,7 +118,7 @@ class HTTPResponse:
         if self.debuglevel > 0:
             print('status:', repr(self.version), repr(self.status), repr(self.reason))
         
-        self.headers, self.cookies = parse_headers(self._sock, more_headers=more_headers, and_cookies=bool(set_cookies))
+        self.headers, self.cookies = parse_headers(self._sock, more_headers=more_headers, with_cookies=bool(set_cookies))
         if self.debuglevel > 0:
             for key, val in self.headers.items():
                 print('header:', repr(key), '=', repr(val))

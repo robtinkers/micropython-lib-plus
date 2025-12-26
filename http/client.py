@@ -56,7 +56,7 @@ def create_connection(address, timeout=None):
         sock = None
         try:
             sock = socket.socket(f, t, p)
-            if timeout is not None:
+            if timeout != 0: # 0 would be a non-blocking socket
                 try:
                     sock.settimeout(timeout)
                 except (AttributeError, OSError):

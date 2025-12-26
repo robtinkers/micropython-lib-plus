@@ -105,9 +105,8 @@ def parse_headers(sock, *, extra_headers=False, parse_cookies=None): # returns d
                     if sep:
                         key = key.decode(_DECODE_HEAD)
                         cookies[key] = val # includes any quotes and parameters
-            elif extra_headers == True \
-                    or (isinstance(extra_headers, (frozenset, set, list, tuple, dict)) and key in extra_headers) \
-                    or key in _IMPORTANT_HEADERS:
+            elif extra_headers == True or key in _IMPORTANT_HEADERS \
+                    or (isinstance(extra_headers, (frozenset, set, list, tuple)) and key in extra_headers):
                 key = key.decode(_DECODE_HEAD)
                 if key in headers:
                     headers[key] += b', ' + val

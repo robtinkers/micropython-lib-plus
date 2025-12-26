@@ -139,21 +139,21 @@ class HTTPResponse:
                 print('cookie:', repr(key), '=', repr(val))
         
         # are we using the chunked-style of transfer encoding?
-        self.chunked = b'chunked' in self.getheader(b'transfer-encoding', b'').lower()
+        self.chunked = b'chunked' in self.headers.get(b'transfer-encoding', b'').lower()
         self.chunk_left = None
         
         # will the connection close at the end of the response?
         if self.status == 101:
             self.will_close = True
         elif self.version == 11:
-            self.will_close = b'close' in self.getheader(b'connection', b'').lower()
+            self.will_close = b'close' in self.headers.get(b'connection', b'').lower()
         else:
-            self.will_close = not (b'keep-alive' in self.getheader(b'connection', b'').lower() or self.getheader(b'keep-alive'))
+            self.will_close = b'keep-alive' not in self.headers.get(b'connection', b'').lower() and self.headers.get(b'keep-alive') is None
         
         # do we have a Content-Length?
         # NOTE: RFC 2616, S4.4, #3 says we ignore this if chunked
         self.length = None
-        length = self.getheader(b'content-length')
+        length = self.headers.get(b'content-length')
         if length and not self.chunked:
             try:
                 self.length = int(length, 10)
@@ -535,9 +535,9 @@ class HTTPConnection:
                 if content_length is None:
                     if body is not None:
                         encode_chunked = True
-                        self.putheader('Transfer-Encoding', 'chunked')
+                        self.putheader(b'Transfer-Encoding', b'chunked')
                 else:
-                    self.putheader('Content-Length', str(content_length))
+                    self.putheader(b'Content-Length', str(content_length))
         else:
             encode_chunked = False
         
@@ -555,7 +555,7 @@ class HTTPConnection:
         self._method = method
         self._url = url or '/'
         
-        request = b' '.join((self._method.encode(_ENCODE_HEAD), self._url.encode(_ENCODE_HEAD), b'HTTP/1.1\r\n'))
+        request = b'%s %s HTTP/1.1\r\n' % (self._method.encode(_ENCODE_HEAD), self._url.encode(_ENCODE_HEAD))
         if b'\0' in request or 0 <= request.find(b'\r') < len(request) - 2 or 0 <= request.find(b'\n') < len(request) - 2:
             raise ValueError('request can\'t contain control characters')
         
@@ -575,11 +575,11 @@ class HTTPConnection:
             if ':' in host and not host.startswith('['):
                 host = '[%s]' % (host,)
             if self.port == self.default_port:
-                self.putheader('Host', host)
+                self.putheader(b'Host', host)
             else:
-                self.putheader('Host', '%s:%s' % (host, self.port))
+                self.putheader(b'Host', '%s:%d' % (host, self.port))
         if not skip_accept_encoding:
-            self.putheader('Accept-Encoding', 'identity')
+            self.putheader(b'Accept-Encoding', b'identity')
     
     def putheaders(self, headers, cookies=None): # extension
         if headers is not None:
@@ -592,8 +592,12 @@ class HTTPConnection:
             for key, val in cookies.items():
                 if val is not None:
                     values.append(b'%s=%s' % (key.encode(_ENCODE_HEAD), _enck(val)))
-            if values:
-                self.putheader('Cookie', b'; '.join(values))
+            if len(values) == 0:
+                return
+            elif len(values) == 1:
+                self.putheader(b'Cookie', values[0])
+            else:
+                self.putheader(b'Cookie', b'; '.join(values))
     
     def putheader(self, header, *values):
         if len(values) == 0:
@@ -602,7 +606,9 @@ class HTTPConnection:
             values = _enck(values[0], _ENCODE_HEAD)
         else:
             values = b'\r\n\t'.join([_enck(v, _ENCODE_HEAD) for v in values])
-        self._sendall(b'%s: %s\r\n' % (header.encode(_ENCODE_HEAD), values))
+        if isinstance(header, str):
+            header = header.encode(_ENCODE_HEAD)
+        self._sendall(b'%s: %s\r\n' % (header, values))
     
     def endheaders(self, message_body=None, *, encode_chunked=False):
         self._sendall(b'\r\n')

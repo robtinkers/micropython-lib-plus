@@ -311,8 +311,8 @@ class HTTPResponse:
                 self._close(True)  # Malformed data: chunk size error
                 break
             
-            # If bounded read(N), allow short read: return after any bytes read.
-            if arg is not None and not isinstance(arg, memoryview) and total > 0:
+            # short read under specific circumstances to avoid the join() below
+            if not isinstance(arg, memoryview) and arg is not None and total > 0:
                 break
         
         if isinstance(arg, memoryview):

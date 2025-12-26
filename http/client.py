@@ -567,7 +567,7 @@ class HTTPConnection:
         if not skip_host:
             host = self.host
             if ':' in host and not host.startswith('['):
-                host = '[%s]' % (host, )
+                host = '[%s]' % (host,)
             if self.port == self.default_port:
                 self.putheader('Host', host)
             else:
@@ -646,14 +646,14 @@ class HTTPConnection:
                     if not d:
                         continue
                 else:
-                    raise TypeError('iterator data must be bytes-like')
+                    raise TypeError("unexpected %s" % (type(d).__name__,))
                 if encode_chunked:
                     self._sendall(b'%X\r\n' % (len(d),))
                 self._sendall(d)
                 if encode_chunked:
                     self._sendall(b'\r\n')
         else:
-            raise TypeError('data must be bytes-like, file-like, or an iterator')
+            raise TypeError("unexpected %s" % (type(data).__name__,))
         
         if encode_chunked:
             if self.debuglevel > 0:

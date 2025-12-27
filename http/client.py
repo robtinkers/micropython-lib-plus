@@ -69,7 +69,7 @@ def create_connection(address, timeout=None):
                 sock.close()
     raise OSError('create_connection() failed')
 
-def parse_headers(sock, *, extra_headers=False, parse_cookies=None): # returns dict/s {str:bytes, ...}
+def parse_headers(sock, *, extra_headers=False, parse_cookies=None): # returns dict/s {bytes:bytes, ...}
     headers = {}
     if parse_cookies is not None:
         cookies = {}
@@ -418,23 +418,23 @@ class HTTPResponse:
     def getcookies(self): # extension, returns {bytes:bytes, ...}
         return self.cookies.items()
     
-    def iter_content(self, chunk_size=1024): # extension
-        chunk_size = int(chunk_size)
-        if chunk_size <= 0:
-            raise ValueError('chunk_size must be > 0')
-        while True:
-            b = self.read(chunk_size)
-            if not b:
-                return
-            yield b
+#    def iter_content(self, chunk_size=1024): # extension
+#        chunk_size = int(chunk_size)
+#        if chunk_size <= 0:
+#            raise ValueError('chunk_size must be > 0')
+#        while True:
+#            b = self.read(chunk_size)
+#            if not b:
+#                return
+#            yield b
     
-    def iter_content_into(self, buf): # extension
-        bmv = buf if isinstance(buf, memoryview) else memoryview(buf)
-        while True:
-            n = self.readinto(bmv)
-            if not n:
-                return
-            yield n
+#    def iter_content_into(self, buf): # extension
+#        bmv = buf if isinstance(buf, memoryview) else memoryview(buf)
+#        while True:
+#            n = self.readinto(bmv)
+#            if not n:
+#                return
+#            yield n
 
 class HTTPConnection:
     default_port = HTTP_PORT
@@ -584,28 +584,24 @@ class HTTPConnection:
     def putheaders(self, headers, cookies=None): # extension
         if headers is not None:
             for key, val in headers.items():
-                if val is not None:
-                    self.putheader(key, val)
+                self.putheader(key, val)
         
         if cookies is not None:
             values = []
             for key, val in cookies.items():
-                if val is not None:
-                    values.append(b'%s=%s' % (key.encode(_ENCODE_HEAD), _enck(val)))
-            if len(values) == 0:
-                return
-            elif len(values) == 1:
+                values.append(b'%s=%s' % (key.encode(_ENCODE_HEAD), _enck(val)))
+            if len(values) == 1:
                 self.putheader(b'Cookie', values[0])
-            else:
+            elif len(values):
                 self.putheader(b'Cookie', b'; '.join(values))
     
     def putheader(self, header, *values):
-        if len(values) == 0:
-            return
-        elif len(values) == 1:
+        if len(values) == 1:
             values = _enck(values[0], _ENCODE_HEAD)
-        else:
+        elif len(values):
             values = b'\r\n\t'.join([_enck(v, _ENCODE_HEAD) for v in values])
+        else:
+            return
         if isinstance(header, str):
             header = header.encode(_ENCODE_HEAD)
         self._sendall(b'%s: %s\r\n' % (header, values))

@@ -315,13 +315,14 @@ def urlsplit_to_tuple(url: str, scheme='', allow_fragments: bool=True) -> tuple:
         scheme = scheme.strip()
     
     netloc = query = fragment = ''
-    if (i := url.find(':')) > 0 and url[0].isalpha():
-        scheme, url = url[:i].lower(), url[i+1:]
+    if (colon := url.find(':')) > 0 and url[0].isalpha():
+        if (slash := url.find('/')) < 0 or colon < slash:
+            scheme, url = url[:colon].lower(), url[colon+1:]
     if url.startswith('//'):
         delim = len(url)
         for c in '/?#':
-            if 0 <= (i := url.find(c, 2)) < delim:
-                delim = i
+            if 0 <= (x := url.find(c, 2)) < delim:
+                delim = x
         netloc, url = url[2:delim], url[delim:]
     
     if allow_fragments and (i := url.find('#')) >= 0:

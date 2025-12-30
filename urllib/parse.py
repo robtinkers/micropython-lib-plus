@@ -201,24 +201,12 @@ def unquote_to_bytes(s) -> bytes:
 
 def _urlencode_generator(query, doseq=False, safe='', *, quote_via=quote_plus):
     for key, val in (query.items() if hasattr(query, 'items') else query):
-        if isinstance(key, (str, bytes, bytearray)):
-            key = quote_via(key, safe)
-        else:
-            key = quote_via(str(key), safe)
-        
-        if isinstance(val, (str, bytes, bytearray)):
-            val = quote_via(val, safe)
-            yield key + '=' + val
-        elif doseq: # trust the caller
+        key = quote_via(key, safe)
+        if doseq and not isinstance(val, (str, bytes, bytearray)):
             for v in val:
-                if isinstance(v, (str, bytes, bytearray)):
-                    v = quote_via(v, safe)
-                else:
-                    v = quote_via(str(v), safe)
-                yield key + '=' + v
+                yield key + '=' + quote_via(v, safe)
         else:
-            val = quote_via(str(val), safe)
-            yield key + '=' + val
+            yield key + '=' + quote_via(val, safe)
 
 def urlencode(query, *args, **kwargs) -> str:
     return '&'.join(_urlencode_generator(query, *args, **kwargs))
@@ -278,7 +266,7 @@ def _parse_generator(qs, keep_blank_values=False, strict_parsing=False,
             break
         i = j + 1
 
-def parse_qs(qs: str, *args, **kwargs) -> dict:
+def parse_qs(qs, *args, **kwargs) -> dict:
     res = {}
     for key, val in _parse_generator(qs, *args, **kwargs):
         if key in res:
@@ -287,10 +275,10 @@ def parse_qs(qs: str, *args, **kwargs) -> dict:
             res[key] = [val]
     return res
 
-def parse_qsl(qs: str, *args, **kwargs) -> list:
+def parse_qsl(qs, *args, **kwargs) -> list:
     return list(_parse_generator(qs, *args, **kwargs))
 
-def urldecode(qs: str, *args, **kwargs) -> dict:
+def urldecode(qs, *args, **kwargs) -> dict:
     res = {}
     for key, val in _parse_generator(qs, *args, **kwargs):
         res[key] = val

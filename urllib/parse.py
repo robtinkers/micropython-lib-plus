@@ -227,13 +227,13 @@ def _mv_find(mv: ptr8, b: int, start: int, end: int) -> int:
 
 def _parse_generator(qs, keep_blank_values=False, strict_parsing=False,
                      *, max_num_fields=None, separator='&'):
-    if not qs:
-        return
-    if not isinstance(qs, (memoryview, bytes)):
+    if not isinstance(qs, (memoryview, bytes, bytearray)):
         qs = memoryview(qs)
+    n = len(qs)
+    if n == 0:
+        return
     
     sep = ord(separator)
-    n = len(qs)
     i = 0
     num_fields = 0
     
@@ -251,16 +251,16 @@ def _parse_generator(qs, keep_blank_values=False, strict_parsing=False,
             if eq >= 0:
                 # key=value
                 if keep_blank_values or (eq + 1 < j):
-                    kb = _unquote(qs, i, eq, True)
-                    vb = _unquote(qs, eq + 1, j, True)
-                    yield kb.decode('utf-8'), vb.decode('utf-8')
+                    key = _unquote(qs, i, eq, True).decode('utf-8')
+                    val = _unquote(qs, eq + 1, j, True).decode('utf-8')
+                    yield key, val
             else:
                 # key (no '=')
                 if strict_parsing:
                     raise ValueError('bad query field')
                 if keep_blank_values:
-                    kb = _unquote(qs, i, j, True)
-                    yield kb.decode('utf-8'), ''
+                    key = _unquote(qs, i, j, True).decode('utf-8')
+                    yield key, ''
         except UnicodeError:
             if strict_parsing:
                 raise

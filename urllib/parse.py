@@ -458,7 +458,7 @@ def urlunsplit(components: tuple) -> str:
     if netloc == '':
         if not scheme or scheme not in _USES_NETLOC or (url and not url.startswith('/')):
             netloc = None
-    return _urlunsplit(scheme or '', netloc, url or '', query, fragment)
+    return _urlunsplit(scheme, netloc, url or '', query, fragment)
 
 
 

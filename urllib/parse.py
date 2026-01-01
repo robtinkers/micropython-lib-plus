@@ -443,10 +443,9 @@ def urlsplit(url: str, scheme='', allow_fragments=True) -> SplitResult:
 
 
 # derived from CPython (all bugs are mine)
-def _urlunsplit(scheme, netloc, path, query, fragment) -> str:
+def _urlunsplit(scheme, netloc, path: str, query, fragment) -> str:
 #    assert (path is not None)
     
-    url = path
     if netloc is not None:
         if path and path[0] != '/':
             path = '/' + path

@@ -3,10 +3,10 @@
 import micropython, socket
 try:
     from dev.urllib_parse import _urlsplit, _locsplit
-    _have_urlsplit = 1
+#    _have_urlsplit = 1
     _have_locsplit = 1
 except ImportError:
-    _have_urlsplit = 0
+#    _have_urlsplit = 0
     _have_locsplit = 0
 
 HTTP_PORT = const(80)

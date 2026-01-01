@@ -244,7 +244,7 @@ def unquote_to_bytes(s) -> bytes:
 
 
 def _urlencode_generator(query, doseq=False, safe='', encoding=None, errors=None, quote_via=quote_plus):
-    if hasattr(query, 'items') and callable(query.items):
+    if isinstance(query, dict):
         query = query.items()
     for key, val in query:
         if not isinstance(key, (str, bytes, bytearray, memoryview)):
@@ -350,24 +350,32 @@ def _locsplit(netloc: str) -> tuple: # extension
         hostport = netloc
         username, password = None, None
     
-    if hostport[0] == '[': # Handle IPv6 (simple check)
+    if hostport and hostport[0] == '[': # Handle IPv6 (simple check)
         if (sep := hostport.find(']')) >= 0:
-            host, port_string = hostport[1:sep], hostport[sep+1:]
-            port_string = port_string or None
+            host, maybe_port = hostport[1:sep], hostport[sep+1:]
         else: # *shrug*
-            host, port_string = hostport, None
+            host, maybe_port = hostport, ''
     else:
         if (sep := hostport.rfind(':')) >= 0:
-            host, port_string = hostport[:sep], hostport[sep:]
+            host, maybe_port = hostport[:sep], hostport[sep:]
         else:
-            host, port_string = hostport, None
+            host, maybe_port = hostport, ''
     
     if host:
         host = host.lower()
     else:
         host = None
     
-    return (username, password, host, port_string)
+    port = maybe_port
+    if not maybe_port:
+        port = None
+    elif maybe_port.startswith(':'):
+        try:
+            port = int(maybe_port[1:], 10)
+        except ValueError:
+            pass # port is already maybe_port
+    
+    return (username, password, host, port)
 
 # derived from CPython (all bugs are mine)
 def _urlsplit(url: str, scheme, allow_fragments: bool) -> tuple:
@@ -422,15 +430,8 @@ class SplitResult(tuple):
     def port(self):
         if self._port is None:
             return None
-        if not self._port or self._port[0] != ':':
+        if not isinstance(self._port, int) or not (0 <= port <= 65535):
             raise ValueError('bad port number')
-        try:
-            port = int(self._port[1:], 10)
-        except ValueError:
-            raise ValueError('bad port number')
-        else:
-            if not (0 <= port <= 65535):
-                raise ValueError('bad port number')
         return port
     
     def geturl(self):

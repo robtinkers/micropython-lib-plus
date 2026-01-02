@@ -509,6 +509,7 @@ class HTTPConnection:
     def set_debuglevel(self, level):
         self.debuglevel = level
     
+    # derived from CPython (all bugs are mine)
     def _get_hostport(self, host, port):
         if port is None:
             i = host.rfind(':')
@@ -621,9 +622,7 @@ class HTTPConnection:
         self._method = method
         self._url = url or "/"
         
-        request = b"%s %s HTTP/1.1\r\n" % (self._method.encode(_ENCODE_HEAD), self._url.encode(_ENCODE_HEAD))
-        if b'\0' in request or 0 <= request.find(b'\r') < len(request) - 2 or 0 <= request.find(b'\n') < len(request) - 2:
-            raise ValueError("request can't contain control characters")
+        request = b"%s %s HTTP/1.1\r\n" % (encode_and_validate(self._method, _ENCODE_HEAD), encode_and_validate(self._url, _ENCODE_HEAD))
         
         try:
             self._sendall(request)

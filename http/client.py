@@ -501,11 +501,9 @@ class HTTPConnection:
         self.timeout = timeout
 #        self.source_address = source_address  # not used
         self.blocksize = blocksize
-        
         self.sock = None
         self._method = None
         self._url = None
-        
         self.__response = None
     
     def set_debuglevel(self, level):

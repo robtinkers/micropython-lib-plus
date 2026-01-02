@@ -35,17 +35,26 @@ _DECODE_BODY = const('utf-8')
 _ENCODE_HEAD = const('iso-8859-1')
 _ENCODE_BODY = const('utf-8')
 
-def _enck(b, *args): # encode-and-check helper
+@micropython.viper
+def _has_control_char(buf:ptr8, buflen:int) -> int:
+    i = 0
+    while i < buflen:
+        i += 1
+        if buf[i] < 32:
+            return 1
+    return 0
+
+def _encode_and_validate(b, *args):
     if isinstance(b, (bytes, bytearray)):
         pass
-    elif hasattr(b, 'encode'):
+    elif isinstance(b, str):
         b = b.encode(*args)
-#    elif isinstance(b, memoryview):
-#        b = bytes(b)
+    elif isinstance(b, memoryview):
+        b = bytes(b)
     else:
-        raise TypeError('value must be bytes-like')
-    if b'\0' in b or b'\r' in b or b'\n' in b:
-        raise ValueError('value can\'t contain control characters')
+        raise TypeError('must be bytes-like')
+    if _has_control_char(b, len(b)) == 1:
+        raise ValueError('can\'t contain control characters')
     return b
 
 def _isiterator(x):
@@ -567,9 +576,10 @@ class HTTPConnection:
         self.endheaders(body, encode_chunked=encode_chunked)
     
     def putrequest(self, method, url, skip_host=False, skip_accept_encoding=False):
-        if self.__response is not None and not self.__response.isclosed():
-            raise CannotSendRequest()
-        self.__response = None
+        if self.__response is not None:
+            if not self.__response.isclosed():
+                raise CannotSendRequest()
+            self.__response = None
         
         self._method = method
         self._url = url or '/'
@@ -608,7 +618,7 @@ class HTTPConnection:
         if cookies is not None:
             values = []
             for key, val in cookies.items():
-                values.append(b'%s=%s' % (key.encode(_ENCODE_HEAD), _enck(val)))
+                values.append(b'%s=%s' % (key.encode(_ENCODE_HEAD), _encode_and_validate(val, _ENCODE_HEAD)))
             if len(values) == 1:
                 self.putheader(b'Cookie', values[0])
             elif len(values):
@@ -619,9 +629,9 @@ class HTTPConnection:
             raise CannotSendHeader()
         
         if len(values) == 1:
-            values = _enck(values[0], _ENCODE_HEAD)
+            values = _encode_and_validate(values[0], _ENCODE_HEAD)
         elif len(values):
-            values = b'\r\n\t'.join([_enck(v, _ENCODE_HEAD) for v in values])
+            values = b'\r\n\t'.join([_encode_and_validate(v, _ENCODE_HEAD) for v in values])
         else:
             return
         if isinstance(header, str):

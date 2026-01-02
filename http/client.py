@@ -36,7 +36,7 @@ _ENCODE_HEAD = const('iso-8859-1')
 _ENCODE_BODY = const('utf-8')
 
 @micropython.viper
-def _has_C0_control_code(buf:ptr8, buflen:int) -> int:
+def _has_C0_control(buf:ptr8, buflen:int) -> int:
     i = 0
     while i < buflen:
         if buf[i] < 32:
@@ -45,19 +45,19 @@ def _has_C0_control_code(buf:ptr8, buflen:int) -> int:
     return 0
 
 def _encode_and_validate(b, *args):
-    if isinstance(b, (bytes, bytearray)):
+    if isinstance(b, bytes):
         pass
     elif isinstance(b, str):
         b = b.encode(*args)
-    elif isinstance(b, memoryview):
+    elif isinstance(b, (bytearray, memoryview)):
         b = bytes(b)
     else:
         raise TypeError('must be bytes-like')
-    if _has_C0_control_code(b, len(b)) == 1:
+    if _has_C0_control(b, len(b)) == 1:
         raise ValueError('can\'t contain control characters')
     return b
 
-def _isiterator(x):
+def isiterator(x):
     try:
         iter(x)
         return True
@@ -714,7 +714,7 @@ class HTTPConnection:
                 self._sendall(d)
                 if encode_chunked:
                     self._sendall(b'\r\n')
-        elif _isiterator(data):  # includes generators (bytes-like was handled earlier)
+        elif isiterator(data):  # includes generators (bytes-like was handled earlier)
             for d in data:
                 if isinstance(d, str):
                     d = d.encode(_ENCODE_BODY)

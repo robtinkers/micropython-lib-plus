@@ -495,11 +495,11 @@ class HTTPConnection:
         return False
     
     def __init__(self, host, port=None, timeout=None, source_address=None, blocksize=1024):
-        # source_address is not used
         self.host, self.port = self._get_hostport(host, port)
         if not self.host:
             raise ValueError("invalid host")
         self.timeout = timeout
+#        self.source_address = source_address  # not used
         self.blocksize = blocksize
         
         self.sock = None

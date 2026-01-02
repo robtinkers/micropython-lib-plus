@@ -39,9 +39,9 @@ _ENCODE_BODY = const('utf-8')
 def _has_control_char(buf:ptr8, buflen:int) -> int:
     i = 0
     while i < buflen:
-        i += 1
         if buf[i] < 32:
             return 1
+        i += 1
     return 0
 
 def _encode_and_validate(b, *args):
@@ -631,6 +631,7 @@ class HTTPConnection:
         if len(values) == 1:
             values = _encode_and_validate(values[0], _ENCODE_HEAD)
         elif len(values):
+            # no idea why CPython joins with '\r\n\t' rather than ', '
             values = b'\r\n\t'.join([_encode_and_validate(v, _ENCODE_HEAD) for v in values])
         else:
             return

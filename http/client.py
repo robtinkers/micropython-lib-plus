@@ -11,6 +11,7 @@ HTTP_PORT = const(80)
 HTTPS_PORT = const(443)
 
 OK = const(200)
+responses = {OK: 'OK'}
 
 # We always set the Content-Length header for these methods because some
 # servers will otherwise respond with a 411
@@ -47,7 +48,7 @@ def _enck(b, *args): # encode-and-check helper
         raise ValueError('value can\'t contain control characters')
     return b
 
-def isiterator(x):
+def _isiterator(x):
     try:
         iter(x)
         return True
@@ -459,7 +460,8 @@ class HTTPConnection:
         self.close()
         return False
     
-    def __init__(self, host, port=None, timeout=None, blocksize=1024):
+    def __init__(self, host, port=None, timeout=None, source_address=None, blocksize=1024):
+        # source_address is not used
         if _have_locsplit and port is None and isinstance(host, str):
             _, _, self.host, self.port = _locsplit(host)
         else:
@@ -471,29 +473,29 @@ class HTTPConnection:
         self.timeout = timeout
         self.blocksize = blocksize
         
-        self._sock = None
+        self.sock = None
         self._method = None
         self._url = None
         
-        self._response = None
+        self.__response = None
     
     def set_debuglevel(self, level):
         self.debuglevel = level
     
     def connect(self):
-        self._sock = create_connection((self.host, self.port), self.timeout)
+        self.sock = create_connection((self.host, self.port), self.timeout)
     
     def close(self):
-        if self._sock is not None:
-            self._sock.close()
-            self._sock = None
-        self._response = None
+        if self.sock is not None:
+            self.sock.close()
+            self.sock = None
+        self.__response = None
     
     def _sendall(self, data):
-        if self._sock is None:
+        if self.sock is None:
             raise NotConnected()
         try:
-            self._sock.sendall(data)
+            self.sock.sendall(data)
         except OSError:
             raise NotConnected()
     
@@ -565,11 +567,9 @@ class HTTPConnection:
         self.endheaders(body, encode_chunked=encode_chunked)
     
     def putrequest(self, method, url, skip_host=False, skip_accept_encoding=False):
-        if self._response is not None:
-            if self._response.isclosed():
-                self._response = None
-            else:
-                self.close()
+        if self.__response is not None and not self.__response.isclosed():
+            raise CannotSendRequest()
+        self.__response = None
         
         self._method = method
         self._url = url or '/'
@@ -615,6 +615,9 @@ class HTTPConnection:
                 self.putheader(b'Cookie', b'; '.join(values))
     
     def putheader(self, header, *values):
+        if self.__response is not None:
+            raise CannotSendHeader()
+        
         if len(values) == 1:
             values = _enck(values[0], _ENCODE_HEAD)
         elif len(values):
@@ -626,6 +629,8 @@ class HTTPConnection:
         self._sendall(b'%s: %s\r\n' % (header, values))
     
     def endheaders(self, message_body=None, *, encode_chunked=False):
+        if self.__response is not None:
+            raise CannotSendHeader()
         self._sendall(b'\r\n')
         if message_body is not None:
             self.send(message_body, encode_chunked=encode_chunked)
@@ -661,7 +666,7 @@ class HTTPConnection:
                 self._sendall(d)
                 if encode_chunked:
                     self._sendall(b'\r\n')
-        elif isiterator(data):  # includes generators (bytes-like was handled earlier)
+        elif _isiterator(data):  # includes generators (bytes-like was handled earlier)
             for d in data:
                 if isinstance(d, str):
                     d = d.encode(_ENCODE_BODY)
@@ -690,9 +695,11 @@ class HTTPConnection:
             self._sendall(b'0\r\n\r\n')
     
     def getresponse(self, extra_headers=False, parse_cookies=False): # extra_headers and parse_cookies are an extension
+        if self.__response is not None:
+            raise ResponseNotReady()
         try:
-            self._response = HTTPResponse(self._sock, self.debuglevel, self._method, self._url, extra_headers=extra_headers, parse_cookies=parse_cookies)
-            return self._response
+            self.__response = HTTPResponse(self.sock, self.debuglevel, self._method, self._url, extra_headers=extra_headers, parse_cookies=parse_cookies)
+            return self.__response
         except Exception:
             self.close()
             raise
@@ -719,14 +726,17 @@ else:
             super().connect()
             if self._context is None:
                 try:
-                    self._sock = ssl.wrap_socket(self._sock, server_hostname=self.host)
+                    self.sock = ssl.wrap_socket(self.sock, server_hostname=self.host)
                 except TypeError:
-                    self._sock = ssl.wrap_socket(self._sock)
+                    self.sock = ssl.wrap_socket(self.sock)
             else:
-                self._sock = self._context.wrap_socket(self._sock, server_hostname=self.host)
+                self.sock = self._context.wrap_socket(self.sock, server_hostname=self.host)
 
 class HTTPException(Exception): pass
 class NotConnected(HTTPException): pass
+class CannotSendRequest(HTTPException): pass
+class CannotSendHeader(HTTPException): pass
+class ResponseNotReady(HTTPException): pass
 class BadStatusLine(HTTPException): pass
 class RemoteDisconnected(BadStatusLine): pass
 

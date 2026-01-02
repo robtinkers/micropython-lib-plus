@@ -415,7 +415,10 @@ class HTTPResponse:
         name = name.lower()
         if name in self.headers:
             value = self.headers[name]
-            value = value.decode(_DECODE_HEAD)
+            try:
+                value = value.decode(_DECODE_HEAD)
+            except UnicodeError:
+                value = default
             return value
         else:
             return default

@@ -93,7 +93,7 @@ def parse_headers(sock, *, extra_headers=True, parse_cookies=None):  # returns d
             else:
                 return headers
         
-        if line.startswith((b" ", b"\t")):
+        if line.startswith((b' ', b'\t')):
             if last_header is not None:
                 headers[last_header] += b" " + line.strip()
             continue

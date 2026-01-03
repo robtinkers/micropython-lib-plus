@@ -148,6 +148,7 @@ class HTTPResponse:
         self.close()
         return False
     
+    # derived from CPython (all bugs are mine)
     def __init__(self, sock, debuglevel=0, method=None, url=None, *, extra_headers=False, parse_cookies=False):
         self._sock = sock
         self.debuglevel = debuglevel
@@ -548,6 +549,7 @@ class HTTPConnection:
         except OSError:
             raise NotConnected()
     
+    # derived from CPython (all bugs are mine)
     def request(self, method, url, body=None, headers=None, cookies=None,
                 *, encode_chunked=False):
         if isinstance(body, str):
@@ -615,6 +617,7 @@ class HTTPConnection:
         
         self.endheaders(body, encode_chunked=encode_chunked)
     
+    # derived from CPython (all bugs are mine)
     def putrequest(self, method, url, skip_host=False, skip_accept_encoding=False):
         if self.__response is not None:
             if not self.__response.isclosed():

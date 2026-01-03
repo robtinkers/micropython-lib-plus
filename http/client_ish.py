@@ -211,10 +211,10 @@ class HTTPResponse:
         # read until we get a non-100 response
         while True:
             line = self._sock.readline()
-            if not line:
-                raise RemoteDisconnected()
             if self.debuglevel > 0:
                 print("status:", repr(line))
+            if not line:
+                raise RemoteDisconnected()
             
             if not line.startswith(b"HTTP/"):
                 raise BadStatusLine()
@@ -690,15 +690,15 @@ class HTTPConnection:
     def send(self, data, *, encode_chunked=False):  # encode_chunked is an extension
         if isinstance(data, str):
             data = data.encode(_ENCODE_BODY)
-        if self.debuglevel > 0:
-            print("send:", type(data).__name__)
         
         if data is None:
+            if self.debuglevel > 0:
+                print("send: None")
             pass
         elif isinstance(data, (bytes, bytearray, memoryview)):
+            if self.debuglevel > 0:
+                print("send:", type(data).__name__, len(data))
             if data:
-                if self.debuglevel > 0:
-                    print("send:", type(data).__name__, len(data))
                 if encode_chunked:
                     self._sendall(b"%X\r\n" % (len(data),))
                 self._sendall(data)

@@ -746,7 +746,7 @@ class HTTPConnection:
                 print("send: terminating chunk")
             self._sendall(b"0\r\n\r\n")
     
-    def getresponse(self, extra_headers=False, parse_cookies=False):  # extra_headers and parse_cookies are an extension
+    def getresponse(self, *, extra_headers=False, parse_cookies=False):  # extra_headers and parse_cookies are an extension
         if self.__response is not None:
             raise ResponseNotReady()
         try:

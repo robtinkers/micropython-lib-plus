@@ -382,8 +382,9 @@ def _locsplit(netloc: str) -> tuple: # extension
 def _urlsplit(url: str, scheme, allow_fragments: bool) -> tuple:
 #    assert (isinstance(url, str))
     
-    url = url.lstrip()
-    if scheme:
+    if url and ord(url[0]) < 32:
+        url = url.lstrip()
+    if scheme and (ord(scheme[0]) < 32 or ord(scheme[-1]) < 32):
         scheme = scheme.strip()
     
     netloc = query = fragment = None

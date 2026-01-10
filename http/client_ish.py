@@ -481,8 +481,9 @@ class HTTPResponse:
         else:
             return default
     
-    def getheaders(self):  # incompat, returns {bytes:bytes, ...}
-        return self.headers.items()
+    def getheaders(self):
+        return ((k.decode(_DECODE_HEAD), v.decode(_DECODE_HEAD))
+                 for k, v in self.headers.items())
     
     def getcookie(self, name, default=None):  # extension
         if isinstance(name, str):
@@ -497,8 +498,9 @@ class HTTPResponse:
         else:
             return default
     
-    def getcookies(self):  # extension, returns {bytes:bytes, ...}
-        return self.cookies.items()
+    def getcookies(self):
+        return ((k.decode(_DECODE_HEAD), v.split(b';')[0].decode(_DECODE_HEAD))
+                 for k, v in self.cookies.items())
     
 #    def iter_content(self, chunk_size=1024):  # extension
 #        chunk_size = int(chunk_size)

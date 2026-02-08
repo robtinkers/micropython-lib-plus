@@ -1,4 +1,4 @@
-# robtinkers/i2c.py
+# busio/i2c.py
 
 from micropython import const
 import machine

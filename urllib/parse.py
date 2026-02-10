@@ -362,7 +362,8 @@ def urldecode(qs, *args, **kwargs) -> dict:
 
 
 
-def locsplit_as_tuple(netloc: str) -> tuple: # extension
+# Extension
+def locsplit_as_tuple(netloc: str) -> tuple:
     if (sep := netloc.rfind('@')) >= 0:
         userpass, hostport = netloc[:sep], netloc[sep+1:]
         if (sep := userpass.find(':')) >= 0:
@@ -405,10 +406,11 @@ def locsplit_as_tuple(netloc: str) -> tuple: # extension
     
     return (username, password, host, port)
 
-def locsplit(netloc: str) -> tuple: # extension
+# Extension
+def locsplit(netloc: str) -> tuple:
     return dict(zip(('username', 'password', 'hostname', 'port'), locsplit_as_tuple(netloc)))
 
-# derived from CPython (all bugs are mine)
+# Derived from CPython (all bugs are mine)
 def urlsplit_as_tuple(url: str, scheme, allow_fragments: bool) -> tuple:
 #    assert (isinstance(url, str))
     
@@ -514,7 +516,7 @@ def urlunsplit(components: tuple) -> str:
 
 
 
-# derived from CPython (all bugs are mine)
+# Derived from CPython (all bugs are mine)
 def urljoin(base: str, url: str, allow_fragments: bool=True) -> str:
     if not base:
         return url

@@ -30,8 +30,103 @@ _ENCODE_HEAD = const("utf-8") # micropython doesn't support iso-8859-1
 _DECODE_BODY = const("utf-8")
 _ENCODE_BODY = const("utf-8")
 
-class HTTPMessage(dict): pass
-class HTTPCookies(dict): pass  # Extension
+class HTTPMessage:
+    _lower_key = const(1)
+    
+    def __init__(self, arg=None, **kwargs):
+        self._data = {}
+        if arg is not None:
+            for key, val in arg.items():
+                self[key] = val
+        for key, val in kwargs.items():
+            self[key] = val
+    
+    def __repr__(self):
+        return f"{self.__class__.__name__}(...)"
+    
+    def __contains__(self, key):
+        if isinstance(key, str):
+            key = key.encode(_ENCODE_HEAD)
+        if self._lower_key and isinstance(key, (bytes, bytearray)):
+            key = key.lower()
+        return key in self._data
+    
+    def __delitem__(self, key):
+        if isinstance(key, str):
+            key = key.encode(_ENCODE_HEAD)
+        if self._lower_key and isinstance(key, (bytes, bytearray)):
+            key = key.lower()
+        del self._data[key]
+    
+    def __getitem__(self, key):
+        if isinstance(key, str):
+            key = key.encode(_ENCODE_HEAD)
+        if self._lower_key and isinstance(key, (bytes, bytearray)):
+            key = key.lower()
+        val = self._data[key][1]
+        if isinstance(val, (bytes, bytearray)):
+            val = val.decode(_DECODE_HEAD)
+        return val
+    
+    def __setitem__(self, key, val):
+        raw_key = key
+        if isinstance(key, str):
+            key = key.encode(_ENCODE_HEAD)
+        if self._lower_key and isinstance(key, (bytes, bytearray)):
+            key = key.lower()
+        self._data[key] = (raw_key, val)
+    
+    def _get(self, key, default, decode, delete):
+        if isinstance(key, str):
+            key = key.encode(_ENCODE_HEAD)
+        if self._lower_key and isinstance(key, (bytes, bytearray)):
+            key = key.lower()
+        try:
+            val = self._data[key][1]
+            if decode and isinstance(val, (bytes, bytearray)):
+                val = val.decode(_DECODE_HEAD)
+            if delete:
+                del self._data[key]
+            return val
+        except KeyError:
+            return default
+    
+    def raw(self, key, default=None):
+        return self._get(key, default, False, False)
+    
+    def get(self, key, default=None):
+        return self._get(key, default, True, False)
+    
+    def pop(self, key, default=None):
+        return self._get(key, default, True, True)
+    
+    def keys(self):
+        return list(key for key, val in self._data.values())
+    
+    def raw_items(self):
+        return self._data.values()
+
+_MISSING = object()  # sentinel
+
+class HTTPCookies(HTTPMessage):  # Extension
+    _lower_key = const(0)
+    
+    def __getitem__(self, key):
+        val = super().__getitem__(key)
+        sep = val.find(";")
+        if sep != -1:
+            val = val[:sep]
+        return val
+    
+    def get(self, key, default=None):
+        val = super().get(key, _MISSING)
+        if val is _MISSING:
+            return default
+        sep = val.find(";")
+        if sep != -1:
+            val = val[:sep]
+        return val
+
 class HTTPException(Exception): pass
 class NotConnected(HTTPException): pass
 class ImproperConnectionState(HTTPException): pass
@@ -109,9 +204,9 @@ def parse_host_port(host, port):
 
 def parse_headers(sock, *, extra_headers=True, parse_cookies=None):  # returns dict/s {bytes:bytes, ...}
     # parse_cookies is tri-state:
-    # parse_cookies == True? parse set-cookie headers and return as a dict
-    # parse_cookies == False? don't parse set-cookie headers but return an empty dict
-    # parse_cookies == None? don't parse set-cookie headers and don't even return a dict
+    # parse_cookies == True? parse set-cookie headers and return as an HTTPCookies object
+    # parse_cookies == False? don't parse set-cookie headers but return an empty HTTPCookies object
+    # parse_cookies == None? don't parse set-cookie headers and don't even return an HTTPCookies object
     
     headers = HTTPMessage()
     if parse_cookies is not None:
@@ -128,7 +223,8 @@ def parse_headers(sock, *, extra_headers=True, parse_cookies=None):  # returns d
         
         if line.startswith((b' ', b'\t')):
             if last_header is not None:
-                headers[last_header] += b" " + line.strip()  # line must start with whitespace
+                raw = headers.raw(last_header, b"")
+                headers[last_header] = raw + b" " + line.strip()
             continue
         
         x = line.find(b':')
@@ -152,7 +248,8 @@ def parse_headers(sock, *, extra_headers=True, parse_cookies=None):  # returns d
         elif extra_headers == True or key in _IMPORTANT_HEADERS \
                 or (isinstance(extra_headers, (frozenset, set, list, tuple)) and key in extra_headers):
             if key in headers:
-                headers[key] += b", " + val
+                raw = headers.raw(key, b"")
+                headers[key] = raw + b", " + val
             else:
                 headers[key] = val
             last_header = key
@@ -183,27 +280,27 @@ class HTTPResponse:
         
         self.headers, self.cookies = parse_headers(self._sock, extra_headers=extra_headers, parse_cookies=parse_cookies)
         if self.debuglevel > 0:
-            for key, val in self.headers.items():
+            for key, val in self.headers.raw_items():
                 print("header:", repr(key), "=", repr(val))
-            for key, val in self.cookies.items():
+            for key, val in self.cookies.raw_items():
                 print("cookie:", repr(key), "=", repr(val))
         
         # are we using the chunked-style of transfer encoding?
-        self.chunked = b"chunked" in self.headers.get(b"transfer-encoding", b"").lower()
+        self.chunked = b"chunked" in self.headers.raw(b"transfer-encoding", b"").lower()
         self.chunk_left = None
         
         # will the connection close at the end of the response?
         if self.status == 101:
             self.will_close = True
         elif self.version == 11:
-            self.will_close = b"close" in self.headers.get(b"connection", b"").lower()
+            self.will_close = b"close" in self.headers.raw(b"connection", b"").lower()
         else:
-            self.will_close = b"keep-alive" not in self.headers.get(b"connection", b"").lower() and self.headers.get(b"keep-alive") is None
+            self.will_close = b"keep-alive" not in self.headers.raw(b"connection", b"").lower() and self.headers.raw(b"keep-alive") is None
         
         # do we have a Content-Length?
         # NOTE: RFC 2616, S4.4, #3 says we ignore this if chunked
         self.length = None
-        length = self.headers.get(b"content-length")
+        length = self.headers.raw(b"content-length")
         if length and not self.chunked:
             try:
                 self.length = int(length, 10)
@@ -437,9 +534,9 @@ class HTTPResponse:
             if arg_is_memoryview:
                 to_read = len(arg)
             elif arg is None:
-	            res = self._sock.read()
-	            self.close()
-	            return res
+                res = self._sock.read()
+                self.close()
+                return res
             else:
                 to_read = arg
         
@@ -477,41 +574,25 @@ class HTTPResponse:
             return nread
         return res
     
-    def getheader(self, name, default=None):
-        if isinstance(name, str):
-            name = name.encode(_ENCODE_HEAD)
-        name = name.lower()
-        if name in self.headers:
-            value = self.headers[name]
-            try:
-                value = value.decode(_DECODE_HEAD)
-            except UnicodeError:
-                value = default
-            return value
-        else:
-            return default
+    def geturl(self):
+        return self.url
+    
+    def getcode(self):
+        return self.status
     
     def getheaders(self):
-        return ((k.decode(_DECODE_HEAD), v.decode(_DECODE_HEAD))
-                 for k, v in self.headers.items())
+        return self.headers.raw_items()
+    
+    def getheader(self, name, default=None):
+        return self.headers.get(name, default)
+    
+    # Extension
+    def getcookies(self):
+        return self.cookies.raw_items()
     
     # Extension
     def getcookie(self, name, default=None):
-        if isinstance(name, str):
-            name = name.encode(_ENCODE_HEAD)
-        if name in self.cookies:
-            value = self.cookies[name]
-            x = value.find(b';')
-            if x != -1:
-                value = value[:x]
-            value = value.decode(_DECODE_HEAD)
-            return value
-        else:
-            return default
-    
-    def getcookies(self):
-        return ((k.decode(_DECODE_HEAD), v.split(b';')[0].decode(_DECODE_HEAD))
-                 for k, v in self.cookies.items())
+        return self.cookies.get(name, default)
     
     # Extension
     def iter_content(self, chunk_size=1024):
@@ -559,7 +640,7 @@ class HTTPConnection:
         self.sock = None
         self._method = None
         self._url = None
-        self.__response = None
+        self._response = None
     
     def set_debuglevel(self, level):
         self.debuglevel = level
@@ -571,7 +652,7 @@ class HTTPConnection:
         if self.sock is not None:
             self.sock.close()
             self.sock = None
-        self.__response = None
+        self._response = None
     
     def _sendall(self, data):
         if self.sock is None:
@@ -651,10 +732,10 @@ class HTTPConnection:
     
     # derived from CPython (all bugs are mine)
     def putrequest(self, method, url, skip_host=False, skip_accept_encoding=False):
-        if self.__response is not None:
-            if not self.__response.isclosed():
+        if self._response is not None:
+            if not self._response.isclosed():
                 raise CannotSendRequest()
-            self.__response = None
+            self._response = None
         
         self._method = method
         self._url = url or "/"
@@ -699,7 +780,7 @@ class HTTPConnection:
                 self.putheader(b"Cookie", b"; ".join(values))
     
     def putheader(self, header, *values):
-        if self.__response is not None:
+        if self._response is not None:
             raise CannotSendHeader()
         
         if len(values) == 0:
@@ -717,13 +798,13 @@ class HTTPConnection:
         self._sendall(b"%s: %s\r\n" % (header, values))
     
     def endheaders(self, message_body=None, *, encode_chunked=False):
-        if self.__response is not None:
+        if self._response is not None:
             raise CannotSendHeader()
         self._sendall(b"\r\n")
         if message_body is not None:
             self.send(message_body, encode_chunked=encode_chunked)
     
-    def send(self, data, *, encode_chunked=False):  # encode_chunked is an extension
+    def send(self, data, *, encode_chunked=False, final_chunk=True):  # encode_chunked and final_chunk are extensions
         if isinstance(data, str):
             data = data.encode(_ENCODE_BODY)
         
@@ -777,17 +858,17 @@ class HTTPConnection:
         else:
             raise TypeError("unexpected data")
         
-        if encode_chunked:
+        if encode_chunked and final_chunk:
             if self.debuglevel > 0:
                 print("send: terminating chunk")
             self._sendall(b"0\r\n\r\n")
     
     def getresponse(self, *, extra_headers=False, parse_cookies=False):  # extra_headers and parse_cookies are an extension
-        if self.__response is not None:
+        if self._response is not None:
             raise ResponseNotReady()
         try:
-            self.__response = HTTPResponse(self.sock, self.debuglevel, self._method, self._url, extra_headers=extra_headers, parse_cookies=parse_cookies)
-            return self.__response
+            self._response = HTTPResponse(self.sock, self.debuglevel, self._method, self._url, extra_headers=extra_headers, parse_cookies=parse_cookies)
+            return self._response
         except Exception:
             self.close()
             raise

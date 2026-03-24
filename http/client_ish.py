@@ -87,12 +87,12 @@ class HTTPMessage:
         key = self._normalize_key(key)
         try:
             val = self._store[key][1]
-            if decode and isinstance(val, (bytes, bytearray)):
-                val = val.decode(_DECODE_HEAD)
             if delete:
                 del self._store[key]
+            if decode and isinstance(val, (bytes, bytearray)):
+                val = val.decode(_DECODE_HEAD)
             return val
-        except KeyError:
+        except (KeyError, UnicodeError):
             return default
     
     def get(self, key, default=None):
@@ -663,7 +663,7 @@ class HTTPResponse:
         return True
 
 class HTTPConnection:
-    _buffer_size = 0  # for the request line and headers only (in bytes)
+    _buffer_size = 1024  # for the request line and headers only (in bytes)
     default_port = HTTP_PORT
     auto_open = True
     debuglevel = 0
@@ -717,28 +717,30 @@ class HTTPConnection:
                 self.sock.close()
                 self.sock = None
     
-    def _sendheader(self, raw, first, last):
+    def _sendheader(self, *parts, first=False, last=False):
         if first:
             self._auto_open = self.auto_open
             self._filled = 0
         
-        if raw is None:
-            pass
-        elif self._buffer is not None:
-            len_raw = len(raw)
-            if self._filled + len_raw <= self._buffer_size:
-                self._buffer[self._filled:self._filled+len_raw] = raw
-                self._filled += len_raw
+        if self._buffer is None:
+            if len(parts) == 1:
+                self._sendall(parts[0])
             else:
-                self._sendall(self._buffer[:self._filled])
-                self._filled = 0
-                if len_raw >= self._buffer_size:
-                    self._sendall(raw)
-                else:
-                    self._buffer[:len_raw] = raw
-                    self._filled = len_raw
+                self._sendall(_BLANK.join(parts))
         else:
-            self._sendall(raw)
+            for part in parts:
+                len_part = len(part)
+                if self._filled + len_part <= self._buffer_size:
+                    self._buffer[self._filled:self._filled+len_part] = part
+                    self._filled += len_part
+                else:
+                    self._sendall(self._buffer[:self._filled])
+                    self._filled = 0
+                    if len_part >= self._buffer_size:
+                        self._sendall(part)
+                    else:
+                        self._buffer[:len_part] = part
+                        self._filled = len_part
         
         if last:
             if self._buffer is not None:
@@ -784,8 +786,11 @@ class HTTPConnection:
             else:
                 keys = (header[0] for header in headers) # generator
             for key in keys:
-                if isinstance(key, (bytes, bytearray)):
-                    key = key.decode(_DECODE_HEAD)
+                try:
+                    if isinstance(key, (bytes, bytearray)):
+                        key = key.decode(_DECODE_HEAD)
+                except UnicodeError:
+                    continue
                 key = key.lower()
                 if key == "accept-encoding":
                     have_accept_encoding = True
@@ -853,9 +858,7 @@ class HTTPConnection:
         self._method = method
         self._url = url or "/"
         
-        request = b"%s %s HTTP/1.1\r\n" % (_encode_and_validate(self._method, _ENCODE_HEAD), _encode_and_validate(self._url, _ENCODE_HEAD))
-        
-        self._sendheader(request, True, False)
+        self._sendheader(_encode_and_validate(self._method, _ENCODE_HEAD), b" ", _encode_and_validate(self._url, _ENCODE_HEAD), b" HTTP/1.1\r\n", first=True)
         
         # Issue some standard headers for better HTTP/1.1 compliance
         if not skip_host:
@@ -867,7 +870,7 @@ class HTTPConnection:
             else:
                 self.putheader(b"Host", "%s:%d" % (host, self.port))
         if not skip_accept_encoding:
-            self._sendheader(b"Accept-Encoding: identity\r\n", False, False)
+            self._sendheader(b"Accept-Encoding: identity\r\n")
     
     # Extension
     def putheaders(self, headers, cookies=None):
@@ -891,19 +894,18 @@ class HTTPConnection:
         if isinstance(header, str):
             header = header.encode(_ENCODE_HEAD)
         
-        if len(values) == 1:
-            values = _encode_and_validate(values[0], _ENCODE_HEAD)
-        else: # including len(values) == 0
-            # no idea why CPython joins with "\r\n\t" rather than ", "
-            values = b", ".join([_encode_and_validate(v, _ENCODE_HEAD) for v in values])
-        
-        self._sendheader(b"%s: %s\r\n" % (header, values), False, False)
+        parts = [header]
+        for i in range(len(values)):
+            parts.append(b": " if i == 0 else b", ")
+            parts.append(_encode_and_validate(values[i], _ENCODE_HEAD))
+        parts.append(_CRLF)
+        self._sendheader(*parts)
     
     def endheaders(self, message_body=None, *, encode_chunked=False):
         if self.__state != _CS_REQ_STARTED or self.__response is not None:
             raise CannotSendHeader()
         
-        self._sendheader(_CRLF, False, True)  # include CRLF in the flush
+        self._sendheader(_CRLF, last=True)
         self.__state = _CS_REQ_SENT
         if message_body is not None:
             self.send(message_body, encode_chunked=encode_chunked)
@@ -1018,7 +1020,6 @@ except ImportError:
     pass
 else:
     class HTTPSConnection(HTTPConnection):
-        _buffer_size = 1024  # for the request line and headers only (in bytes)
         default_port = HTTPS_PORT
         
         def __init__(self, *args, context=None, **kwargs):

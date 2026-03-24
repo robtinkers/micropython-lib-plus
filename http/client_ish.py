@@ -37,104 +37,161 @@ _ENCODE_BODY = const("utf-8")
 _BLANK = const(b"")
 _CRLF = const(b"\r\n")
 
-class HTTPMessage:
-    _lower_key = True
+_MISSING = object()  # sentinel
+
+class NormalizedDict(dict):
     
-    def __init__(self, arg=None, **kwargs):
-        self._store = {}
-        if arg is not None:
-            for key, val in arg.items():
-                self[key] = val
-        for key, val in kwargs.items():
-            self[key] = val
+    def _normalize_key(self, key):
+        return key
     
-    def __repr__(self):
-        return f"{self.__class__.__name__}(...)"
+    def _normalize_val(self, val):
+        return val
     
-    def __len__(self):
-        return len(self._store)
+    def __contains__(self, key):
+        key = self._normalize_key(key)
+        return super().__contains__(key)
+    
+    def __setitem__(self, key, val):
+        key = self._normalize_key(key)
+        super().__setitem__(key, val)
+    
+    def __getitem__(self, key):
+        key = self._normalize_key(key)
+        val = super().__getitem__(key)
+        return self._normalize_val(val)
+    
+    def __delitem__(self, key):
+        key = self._normalize_key(key)
+        super().__delitem__(key)
+
+    def set(self, key, val):
+        key = self._normalize_key(key)
+        super().__setitem__(key, val)
+        return key
+    
+    def set_raw(self, key, val):
+        super().__setitem__(key, val)
+        return key
+    
+    def get_raw(self, key, default=None):
+        return super().get(key, default)
+    
+    def get(self, key, default=None):
+        try:
+            key = self._normalize_key(key)
+        except UnicodeError:
+            return default
+        val = super().get(key, _MISSING)
+        if val is _MISSING:
+            return default
+        return self._normalize_val(val)
+    
+    def pop_raw(self, key, default=None):
+        return super().pop(key, default)
+    
+    def pop(self, key, default=None):
+        try:
+            key = self._normalize_key(key)
+        except UnicodeError:
+            return default
+        val = super().pop(key, _MISSING)
+        if val is _MISSING:
+            return default
+        return self._normalize_val(val)
     
     def __iter__(self):
-        return iter(self._store.keys())
+        for key in super().__iter__():
+            yield self._normalize_key(key)
+    
+    def keys(self):
+        for key in super().keys():
+            yield self._normalize_key(key)
+    
+    def values(self):
+        for val in super().values():
+            yield self._normalize_val(val)
+    
+    def items(self):
+        for key, val in super().items():
+            yield self._normalize_key(key), self._normalize_val(val)
+
+class HTTPMessage(NormalizedDict):
     
     def _normalize_key(self, key):
         if isinstance(key, str):
             key = key.encode(_ENCODE_HEAD)
-        if self._lower_key and isinstance(key, (bytes, bytearray)):
-            key = key.lower()
+        if isinstance(key, (bytes, bytearray)):
+            if key:
+                if key[0] <= 32 or key[-1] <= 32:
+                    key = key.strip()
+            if key:
+                key = key.lower()
         return key
     
-    def __contains__(self, key):
-        key = self._normalize_key(key)
-        return key in self._store
-    
-    def __delitem__(self, key):
-        key = self._normalize_key(key)
-        del self._store[key]
-    
-    def __getitem__(self, key):
-        key = self._normalize_key(key)
-        val = self._store[key][1]
+    def _normalize_val(self, val):
         if isinstance(val, (bytes, bytearray)):
             val = val.decode(_DECODE_HEAD)
+        if isinstance(val, str):
+            if val:
+                if val[0].isspace() or val[-1].isspace():
+                    val = val.strip()
+        return val
+
+class HTTPCookies(NormalizedDict):  # Extension
+    
+    def _normalize_key(self, key):
+        if isinstance(key, str):
+            key = key.encode(_ENCODE_HEAD)
+        if isinstance(key, (bytes, bytearray)):
+            if key:
+                if key[0] <= 32 or key[-1] <= 32:
+                    key = key.strip()
+#            if key:
+#                key = key.lower()
+        return key
+    
+    def _normalize_val(self, val):
+        if isinstance(val, (bytes, bytearray)):
+            val = val.decode(_DECODE_HEAD)
+        if isinstance(val, str):
+            sep = val.find(";")
+            if sep != -1:
+                val = val[:sep]
+            if val:
+                if val[0].isspace() or val[-1].isspace():
+                    val = val.strip()
+            if val:
+                if val[0] == '"' and val[-1] == '"':
+                    val = val[1:-1]
         return val
     
-    def __setitem__(self, set_key, set_val):
-        key = self._normalize_key(set_key)
-        self._store[key] = (set_key, set_val)
-    
-    def _get(self, key, default, decode, delete):
-        key = self._normalize_key(key)
+    def attributes(self, key):
         try:
-            val = self._store[key][1]
-            if delete:
-                del self._store[key]
-            if decode and isinstance(val, (bytes, bytearray)):
-                val = val.decode(_DECODE_HEAD)
-            return val
-        except (KeyError, UnicodeError):
-            return default
-    
-    def get(self, key, default=None):
-        return self._get(key, default, True, False)
-    
-    def pop(self, key, default=None):
-        return self._get(key, default, True, True)
-    
-    def keys(self):
-        return (val[0] for val in self._store.values())
-    
-    def items(self):
-        return self._store.values()
-    
-    # Extension
-    def raw(self, key, default=None):
-        return self._get(key, default, False, False)
-    
-    # Extension
-    def rawkeys(self):
-        return self._store.keys()
-
-_MISSING = object()  # sentinel
-
-class HTTPCookies(HTTPMessage):  # Extension
-    _lower_key = False
-    
-    def __getitem__(self, key):
-        val = super().__getitem__(key)
-        sep = val.find(";")
-        if sep != -1:
-            val = val[:sep]
-        return val
-    
-    def get(self, key, default=None):
-        val = super().get(key, _MISSING)
+            key = self._normalize_key(key)
+        except UnicodeError:
+            return {}
+        val = self.get_raw(key, _MISSING)
         if val is _MISSING:
-            return default
-        sep = val.find(";")
-        if sep != -1:
-            val = val[:sep]
-        return val
+            raise KeyError(key)
+        if isinstance(val, (bytes, bytearray)):
+            val = val.decode(_DECODE_HEAD)
+        attrs = {}
+        for attr in val.split(";")[1:]:
+            sep = attr.find("=")
+            if sep != -1:
+                k, v = attr[:sep], attr[sep+1:]
+                if v and (v[0] <= ' ' or v[-1] <= ' '):
+                    v = v.strip()
+                if v and (v[0] == '"' and v[-1] == '"'):
+                    v = v[1:-1]
+            else:
+                k, v = attr, True
+            if k and (k[0] <= ' ' or k[-1] <= ' '):
+                k = k.strip()
+            if k or v is not True:
+                attrs[k] = v
+        return attrs
+
 
 class HTTPException(Exception): pass
 class NotConnected(HTTPException): pass
@@ -218,9 +275,9 @@ def parse_host_port(host, port):
 
 def parse_headers(sock, *, extra_headers=True, parse_cookies=None):  # returns dict/s {bytes:bytes, ...}
     # parse_cookies is tri-state:
-    # parse_cookies == True? parse set-cookie headers and return as an HTTPCookies object
-    # parse_cookies == False? don't parse set-cookie headers but return an empty HTTPCookies object
-    # parse_cookies == None? don't parse set-cookie headers and don't even return an HTTPCookies object
+    # parse_cookies is True? parse set-cookie headers and return as an HTTPCookies object
+    # parse_cookies is False? don't parse set-cookie headers but return an empty HTTPCookies object
+    # parse_cookies is None? don't parse set-cookie headers and don't even return an HTTPCookies object
     
     headers = HTTPMessage()
     if parse_cookies is not None:
@@ -229,7 +286,7 @@ def parse_headers(sock, *, extra_headers=True, parse_cookies=None):  # returns d
     
     while True:
         line = sock.readline()
-        if not line or line == _CRLF:
+        if not line or line == _CRLF or line == b'\n':
             if parse_cookies is not None:
                 return headers, cookies
             else:
@@ -237,35 +294,31 @@ def parse_headers(sock, *, extra_headers=True, parse_cookies=None):  # returns d
         
         if line.startswith((b' ', b'\t')):
             if last_header is not None:
-                raw = headers.raw(last_header, _BLANK)
-                headers[last_header] = raw + b" " + line.strip()
+                old_val = headers.get_raw(last_header, _MISSING)
+                if old_val is not _MISSING:
+                    headers.set_raw(last_header, old_val + b" " + line.strip())
             continue
         
-        x = line.find(b':')
-        if x == -1:
+        sep = line.find(b':')
+        if sep == -1:
             continue
-        key = line[:x].lower()
-        if key and (key[0] <= 32 or key[-1] <= 32):
-            key = key.strip()
-        val = line[x+1:]
-        if val and (val[0] <= 32 or val[-1] <= 32):
-            val = val.strip()
+        key, val = line[:sep], line[sep+1:]
+        key = headers._normalize_key(key)
         
         if key == b"set-cookie":
-            if parse_cookies == True:
-                x = val.find(b'=')
-                if x != -1:
-                    key, val = val[:x], val[x+1:]
-                    if key and key[-1] <= 32:
-                        key = key.rstrip()
-                    cookies[key] = val  # includes any quotes and parameters
-        elif extra_headers == True or key in _IMPORTANT_HEADERS \
-                or (isinstance(extra_headers, (frozenset, set, list, tuple)) and key in extra_headers):
-            if key in headers:
-                raw = headers.raw(key, _BLANK)
-                headers[key] = raw + b", " + val
+            if parse_cookies is True:
+                val = val.strip()
+                sep = val.find(b'=')
+                if sep != -1:
+                    key, val = val[:sep], val[sep+1:]
+                    cookies.set(key, val)  # includes any quotes and parameters
+        elif extra_headers is True or (extra_headers and key in extra_headers) or key in _IMPORTANT_HEADERS:
+            val = val.strip()
+            old_val = headers.get_raw(key, _MISSING)
+            if old_val is not _MISSING:
+                headers.set_raw(key, old_val + b", " + val)
             else:
-                headers[key] = val
+                headers.set_raw(key, val)
             last_header = key
             continue
         
@@ -312,19 +365,19 @@ class HTTPResponse:
                 print("cookie:", repr(key), "=", repr(val))
         
         # are we using the chunked-style of transfer encoding?
-        self.chunked = b"chunked" in self.headers.raw(b"transfer-encoding", _BLANK).lower()
+        self.chunked = b"chunked" in self.headers.get_raw(b"transfer-encoding", _BLANK).lower()
         self.chunk_left = None
         
         # will the connection close at the end of the response?
         if self.version == 11:
-            self.will_close = b"close" in self.headers.raw(b"connection", _BLANK).lower()
+            self.will_close = b"close" in self.headers.get_raw(b"connection", _BLANK).lower()
         else:
-            self.will_close = b"keep-alive" not in self.headers.raw(b"connection", _BLANK).lower() and self.headers.raw(b"keep-alive") is None
+            self.will_close = b"keep-alive" not in self.headers.get_raw(b"connection", _BLANK).lower() and self.headers.get_raw(b"keep-alive") is None
         
         # do we have a Content-Length?
         # NOTE: RFC 2616, S4.4, #3 says we ignore this if chunked
         self.length = None
-        length = self.headers.raw(b"content-length")
+        length = self.headers.get_raw(b"content-length")
         if length and not self.chunked:
             try:
                 self.length = int(length, 10)

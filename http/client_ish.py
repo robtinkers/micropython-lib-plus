@@ -717,7 +717,7 @@ class HTTPConnection:
                 self.sock.close()
                 self.sock = None
     
-    def _sendheader(self, *parts, first=False, last=False):
+    def _putheaderparts(self, *parts, first=False, last=False):
         if first:
             self._auto_open = self.auto_open
             self._filled = 0
@@ -858,7 +858,7 @@ class HTTPConnection:
         self._method = method
         self._url = url or "/"
         
-        self._sendheader(_encode_and_validate(self._method, _ENCODE_HEAD), b" ", _encode_and_validate(self._url, _ENCODE_HEAD), b" HTTP/1.1\r\n", first=True)
+        self._putheaderparts(_encode_and_validate(self._method, _ENCODE_HEAD), b" ", _encode_and_validate(self._url, _ENCODE_HEAD), b" HTTP/1.1\r\n", first=True)
         
         # Issue some standard headers for better HTTP/1.1 compliance
         if not skip_host:
@@ -870,7 +870,7 @@ class HTTPConnection:
             else:
                 self.putheader(b"Host", "%s:%d" % (host, self.port))
         if not skip_accept_encoding:
-            self._sendheader(b"Accept-Encoding: identity\r\n")
+            self._putheaderparts(b"Accept-Encoding: identity\r\n")
     
     # Extension
     def putheaders(self, headers, cookies=None):
@@ -894,18 +894,19 @@ class HTTPConnection:
         if isinstance(header, str):
             header = header.encode(_ENCODE_HEAD)
         
-        parts = [header]
+        parts = [header, b": "]
         for i in range(len(values)):
-            parts.append(b": " if i == 0 else b", ")
+            if i > 0:
+                parts.append(b", ")
             parts.append(_encode_and_validate(values[i], _ENCODE_HEAD))
         parts.append(_CRLF)
-        self._sendheader(*parts)
+        self._putheaderparts(*parts)
     
     def endheaders(self, message_body=None, *, encode_chunked=False):
         if self.__state != _CS_REQ_STARTED or self.__response is not None:
             raise CannotSendHeader()
         
-        self._sendheader(_CRLF, last=True)
+        self._putheaderparts(_CRLF, last=True)
         self.__state = _CS_REQ_SENT
         if message_body is not None:
             self.send(message_body, encode_chunked=encode_chunked)

@@ -447,7 +447,7 @@ class HTTPResponse:
             elif isinstance(chunked, memoryview):
                 return bytes(chunked)
             else:
-                return chunked
+                return chunked  # bytearray or int
         else:
             return self.read_raw(arg)
     
@@ -548,9 +548,13 @@ class HTTPResponse:
         if arg_is_memoryview:
             return total # an integer
         elif res_is_memoryview:
-            return res[:total] # a memoryview
+            if total == len(res):
+                # optimisation so that the caller doesn't have to do bytes() on the return value
+                return buf # a bytearray
+            else:
+                return res[:total] # a memoryview
         else:
-            return res # a list
+            return res # a list of bytes objects
     
     def read_raw(self, arg=None):
         arg_is_memoryview = isinstance(arg, memoryview)
@@ -717,38 +721,6 @@ class HTTPConnection:
                 self.sock.close()
                 self.sock = None
     
-    def _putheaderparts(self, *parts, first=False, last=False):
-        if first:
-            self._auto_open = self.auto_open
-            self._filled = 0
-        
-        if self._buffer is None:
-            if len(parts) == 1:
-                self._sendall(parts[0])
-            else:
-                self._sendall(_BLANK.join(parts))
-        else:
-            for part in parts:
-                len_part = len(part)
-                if self._filled + len_part <= self._buffer_size:
-                    self._buffer[self._filled:self._filled+len_part] = part
-                    self._filled += len_part
-                else:
-                    self._sendall(self._buffer[:self._filled])
-                    self._filled = 0
-                    if len_part >= self._buffer_size:
-                        self._sendall(part)
-                    else:
-                        self._buffer[:len_part] = part
-                        self._filled = len_part
-        
-        if last:
-            if self._buffer is not None:
-                filled = self._filled
-                self._filled = 0
-                if filled:
-                    self._sendall(self._buffer[:filled])
-    
     def _sendall(self, data):
         auto_open = self._auto_open
         self._auto_open = False
@@ -901,6 +873,38 @@ class HTTPConnection:
             parts.append(_encode_and_validate(values[i], _ENCODE_HEAD))
         parts.append(_CRLF)
         self._putheaderparts(*parts)
+    
+    def _putheaderparts(self, *parts, first=False, last=False):
+        if first:
+            self._auto_open = self.auto_open
+            self._filled = 0
+        
+        if self._buffer is None:
+            if len(parts) == 1:
+                self._sendall(parts[0])
+            else:
+                self._sendall(_BLANK.join(parts))
+        else:
+            for part in parts:
+                len_part = len(part)
+                if self._filled + len_part <= self._buffer_size:
+                    self._buffer[self._filled:self._filled+len_part] = part
+                    self._filled += len_part
+                else:
+                    self._sendall(self._buffer[:self._filled])
+                    self._filled = 0
+                    if len_part >= self._buffer_size:
+                        self._sendall(part)
+                    else:
+                        self._buffer[:len_part] = part
+                        self._filled = len_part
+        
+        if last:
+            if self._buffer is not None:
+                filled = self._filled
+                self._filled = 0
+                if filled:
+                    self._sendall(self._buffer[:filled])
     
     def endheaders(self, message_body=None, *, encode_chunked=False):
         if self.__state != _CS_REQ_STARTED or self.__response is not None:

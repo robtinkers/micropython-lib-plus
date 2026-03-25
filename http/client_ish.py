@@ -41,31 +41,31 @@ _MISSING = object()  # sentinel
 
 class NormalizedDict(dict):
     
-    def _normalize_key(self, key):
+    def normalize_key(self, key):
         return key
     
-    def _normalize_val(self, val):
+    def normalize_val(self, val):
         return val
     
     def __contains__(self, key):
-        key = self._normalize_key(key)
+        key = self.normalize_key(key)
         return super().__contains__(key)
     
     def __setitem__(self, key, val):
-        key = self._normalize_key(key)
+        key = self.normalize_key(key)
         super().__setitem__(key, val)
     
     def __getitem__(self, key):
-        key = self._normalize_key(key)
+        key = self.normalize_key(key)
         val = super().__getitem__(key)
-        return self._normalize_val(val)
+        return self.normalize_val(val)
     
     def __delitem__(self, key):
-        key = self._normalize_key(key)
+        key = self.normalize_key(key)
         super().__delitem__(key)
 
     def set(self, key, val):
-        key = self._normalize_key(key)
+        key = self.normalize_key(key)
         super().__setitem__(key, val)
         return key
     
@@ -78,57 +78,58 @@ class NormalizedDict(dict):
     
     def get(self, key, default=None):
         try:
-            key = self._normalize_key(key)
+            key = self.normalize_key(key)
         except UnicodeError:
             return default
-        val = super().get(key, _MISSING)
+        val = self.get_raw(key, _MISSING)
         if val is _MISSING:
             return default
-        return self._normalize_val(val)
+        return self.normalize_val(val)
     
     def pop_raw(self, key, default=None):
         return super().pop(key, default)
     
     def pop(self, key, default=None):
         try:
-            key = self._normalize_key(key)
+            key = self.normalize_key(key)
         except UnicodeError:
             return default
-        val = super().pop(key, _MISSING)
+        val = self.pop_raw(key, _MISSING)
         if val is _MISSING:
             return default
-        return self._normalize_val(val)
+        return self.normalize_val(val)
     
     def __iter__(self):
         for key in super().__iter__():
-            yield self._normalize_key(key)
+            yield self.normalize_key(key)
     
     def keys(self):
         for key in super().keys():
-            yield self._normalize_key(key)
+            yield self.normalize_key(key)
     
     def values(self):
         for val in super().values():
-            yield self._normalize_val(val)
+            yield self.normalize_val(val)
     
     def items(self):
         for key, val in super().items():
-            yield self._normalize_key(key), self._normalize_val(val)
+            yield self.normalize_key(key), self.normalize_val(val)
 
 class HTTPMessage(NormalizedDict):
+    _lower_key = const(1)  # Header names are case-insensitive
     
-    def _normalize_key(self, key):
+    def normalize_key(self, key):
         if isinstance(key, str):
             key = key.encode(_ENCODE_HEAD)
         if isinstance(key, (bytes, bytearray)):
             if key:
                 if key[0] <= 32 or key[-1] <= 32:
                     key = key.strip()
-            if key:
+            if key and self._lower_key:
                 key = key.lower()
         return key
     
-    def _normalize_val(self, val):
+    def normalize_val(self, val):
         if isinstance(val, (bytes, bytearray)):
             val = val.decode(_DECODE_HEAD)
         if isinstance(val, str):
@@ -137,20 +138,10 @@ class HTTPMessage(NormalizedDict):
                     val = val.strip()
         return val
 
-class HTTPCookies(NormalizedDict):  # Extension
+class HTTPCookies(HTTPMessage):  # Extension
+    _lower_key = const(0)  # Cookie names are case-sensitive
     
-    def _normalize_key(self, key):
-        if isinstance(key, str):
-            key = key.encode(_ENCODE_HEAD)
-        if isinstance(key, (bytes, bytearray)):
-            if key:
-                if key[0] <= 32 or key[-1] <= 32:
-                    key = key.strip()
-#            if key:
-#                key = key.lower()
-        return key
-    
-    def _normalize_val(self, val):
+    def normalize_val(self, val):
         if isinstance(val, (bytes, bytearray)):
             val = val.decode(_DECODE_HEAD)
         if isinstance(val, str):
@@ -167,7 +158,7 @@ class HTTPCookies(NormalizedDict):  # Extension
     
     def attributes(self, key):
         try:
-            key = self._normalize_key(key)
+            key = self.normalize_key(key)
         except UnicodeError:
             return {}
         val = self.get_raw(key, _MISSING)
@@ -191,7 +182,6 @@ class HTTPCookies(NormalizedDict):  # Extension
             if k or v is not True:
                 attrs[k] = v
         return attrs
-
 
 class HTTPException(Exception): pass
 class NotConnected(HTTPException): pass
@@ -303,7 +293,7 @@ def parse_headers(sock, *, extra_headers=True, parse_cookies=None):  # returns d
         if sep == -1:
             continue
         key, val = line[:sep], line[sep+1:]
-        key = headers._normalize_key(key)
+        key = headers.normalize_key(key)
         
         if key == b"set-cookie":
             if parse_cookies is True:

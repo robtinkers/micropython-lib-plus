@@ -1,6 +1,6 @@
 # http/client_ish.py
 
-import micropython, socket
+import micropython, socket, errno, time
 
 HTTP_PORT = const(80)
 HTTPS_PORT = const(443)
@@ -77,10 +77,7 @@ class NormalizedDict(dict):
         return super().get(key, default)
     
     def get(self, key, default=None):
-        try:
-            key = self.normalize_key(key)
-        except UnicodeError:
-            return default
+        key = self.normalize_key(key)
         val = self.get_raw(key, _MISSING)
         if val is _MISSING:
             return default
@@ -90,10 +87,7 @@ class NormalizedDict(dict):
         return super().pop(key, default)
     
     def pop(self, key, default=None):
-        try:
-            key = self.normalize_key(key)
-        except UnicodeError:
-            return default
+        key = self.normalize_key(key)
         val = self.pop_raw(key, _MISSING)
         if val is _MISSING:
             return default
@@ -157,10 +151,7 @@ class HTTPCookies(HTTPMessage):  # Extension
         return val
     
     def attributes(self, key):
-        try:
-            key = self.normalize_key(key)
-        except UnicodeError:
-            return {}
+        key = self.normalize_key(key)
         val = self.get_raw(key, _MISSING)
         if val is _MISSING:
             raise KeyError(key)
@@ -523,12 +514,8 @@ class HTTPResponse:
                     break
                 
                 # Strip chunk extensions
-                x = line.find(b';')
-                if x != -1:
-                    line = line[:x]
-                
                 try:
-                    self.chunk_left = int(line.strip(), 16)  # line always ends with CRLF
+                    self.chunk_left = int(line.split(b';')[0].strip(), 16)
                 except ValueError:
                     # Malformed data: invalid chunk size
                     self._close(True)
@@ -560,11 +547,15 @@ class HTTPResponse:
                 to_read = min(self.chunk_left, len(res) - total)
                 if to_read <= 0:
                     break # buffer full, not EOF
-                nread = sock.readinto(res[total:total+to_read]) or 0
+                nread = sock.readinto(res[total:total+to_read])
+                if nread is None:
+                    raise OSError(errno.EAGAIN)
             else:
                 to_read = self.chunk_left
                 if to_read > 0:
                     chunk = sock.read(to_read)
+                    if chunk is None:
+                        raise OSError(errno.EAGAIN)
                     if chunk:
                         res.append(chunk)
                         nread = len(chunk)
@@ -621,7 +612,9 @@ class HTTPResponse:
             if arg_is_memoryview:
                 to_read = len(arg)
             elif arg is None:
-                res = self._sock.read() or _BLANK
+                res = self._sock.read()
+                if res is None:
+                    raise OSError(errno.EAGAIN)
                 self.close()
                 return res
             else:
@@ -643,9 +636,13 @@ class HTTPResponse:
                 to_read = min(self.length, arg)
         
         if arg_is_memoryview:
-            nread = self._sock.readinto(arg[:to_read]) or 0
+            nread = self._sock.readinto(arg[:to_read])
+            if nread is None:
+                raise OSError(errno.EAGAIN)
         else:
-            res = self._sock.read(to_read) or _BLANK
+            res = self._sock.read(to_read)
+            if res is None:
+                raise OSError(errno.EAGAIN)
             nread = len(res)
         
         if nread <= 0:
@@ -691,7 +688,13 @@ class HTTPResponse:
             raise ValueError("chunk_size must be > 0")
         buf = memoryview(bytearray(chunk_size))
         while True:
-            n = self.readinto(buf) or 0
+            try:
+                n = self.readinto(buf)
+            except OSError as e:
+                if e.errno == errno.EAGAIN:
+                    time.sleep_ms(1)
+                    continue
+                raise
             if not n:
                 return
             yield bytes(buf[:n])
@@ -699,7 +702,13 @@ class HTTPResponse:
     # Extension
     def iter_content_into(self, buf):
         while True:
-            n = self.readinto(buf) or 0
+            try:
+                n = self.readinto(buf)
+            except OSError as e:
+                if e.errno == errno.EAGAIN:
+                    time.sleep_ms(1)
+                    continue
+                raise
             if not n:
                 return
             yield n
@@ -979,6 +988,9 @@ class HTTPConnection:
                 n = data.readinto(buf)  # if you need non-blocking reads, refactor as an iterator
                 if self.debuglevel > 0:
                     print("send:", type(data).__name__, None if n is None else n)
+                if n is None:
+                    time.sleep_ms(1)
+                    continue
                 if not n:
                     break
                 if encode_chunked:
@@ -994,6 +1006,9 @@ class HTTPConnection:
                     d = d.encode(_ENCODE_BODY)
                 if self.debuglevel > 0:
                     print("send:", type(d).__name__, None if d is None else len(d))
+                if d is None:
+                    time.sleep_ms(1)
+                    continue
                 if not d:
                     break
                 if encode_chunked:

@@ -231,12 +231,10 @@ def _create_connection(address, timeout):
         except OSError:
             if sock is not None:
                 sock.close()
+    raise OSError(128)  # ENOTCONN
 
 def create_connection(address, timeout=None):
-    sock = _create_connection(address, timeout)
-    if sock is None:
-        raise OSError("create_connection() failed")
-    return sock
+    return _create_connection(address, timeout)
 
 # derived from CPython (all bugs are mine)
 def parse_host_port(host, port):
@@ -698,7 +696,7 @@ class HTTPResponse:
             if n is None:
                 continue
             if not n:
-                return
+                break
             yield bytes(buf[:n])
         
         poller.unregister(self._sock)
@@ -715,7 +713,7 @@ class HTTPResponse:
             if n is None:
                 continue
             if not n:
-                return
+                break
             yield n
         
         poller.unregister(self._sock)
@@ -792,7 +790,10 @@ class HTTPConnection:
                 try: self.sock.close()
                 except: pass
             self.sock = None
-            self.connect()
+            try:
+                self.connect()
+            except OSError:
+                raise NotConnected()
         elif self.sock is None:
             raise NotConnected()
         

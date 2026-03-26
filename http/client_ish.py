@@ -318,7 +318,7 @@ class HTTPResponse:
         self.debuglevel = debuglevel
         self._method = method
         self.url = url
-        self.incomplete = True
+        self.complete = False
         #
         self.version = None
         self.status = None
@@ -436,7 +436,7 @@ class HTTPResponse:
         if hard or self.chunk_left is not None or (self.length is not None and self.length > 0):
             pass
         else:
-            self.incomplete = False
+            self.complete = True
         if hard or self.chunk_left is not None or (self.length is not None and self.length > 0) or self.will_close:
             if self._sock is not None:
                 self._sock.close()

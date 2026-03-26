@@ -1,6 +1,6 @@
 # http/client_ish.py
 
-import micropython, socket, errno, time
+import micropython, socket, select
 
 HTTP_PORT = const(80)
 HTTPS_PORT = const(443)
@@ -132,7 +132,7 @@ class HTTPMessage(NormalizedDict):
                     val = val.strip()
         return val
 
-class HTTPCookies(HTTPMessage):  # Extension
+class HTTPCookies(NormalizedDict):  # Extension
     _lower_key = const(0)  # Cookie names are case-sensitive
     
     def normalize_val(self, val):
@@ -549,13 +549,13 @@ class HTTPResponse:
                     break # buffer full, not EOF
                 nread = sock.readinto(res[total:total+to_read])
                 if nread is None:
-                    raise OSError(errno.EAGAIN)
+                    break  # ???
             else:
                 to_read = self.chunk_left
                 if to_read > 0:
                     chunk = sock.read(to_read)
                     if chunk is None:
-                        raise OSError(errno.EAGAIN)
+                        break  # ???
                     if chunk:
                         res.append(chunk)
                         nread = len(chunk)
@@ -614,7 +614,7 @@ class HTTPResponse:
             elif arg is None:
                 res = self._sock.read()
                 if res is None:
-                    raise OSError(errno.EAGAIN)
+                    return None
                 self.close()
                 return res
             else:
@@ -638,11 +638,11 @@ class HTTPResponse:
         if arg_is_memoryview:
             nread = self._sock.readinto(arg[:to_read])
             if nread is None:
-                raise OSError(errno.EAGAIN)
+                return None  # ???
         else:
             res = self._sock.read(to_read)
             if res is None:
-                raise OSError(errno.EAGAIN)
+                return None  # ???
             nread = len(res)
         
         if nread <= 0:
@@ -687,31 +687,38 @@ class HTTPResponse:
         if chunk_size <= 0:
             raise ValueError("chunk_size must be > 0")
         buf = memoryview(bytearray(chunk_size))
+        
+        poller = select.poll()
+        poller.register(self._sock, select.POLLIN)
+        
         while True:
-            try:
-                n = self.readinto(buf)
-            except OSError as e:
-                if e.errno == errno.EAGAIN:
-                    time.sleep_ms(1)
-                    continue
-                raise
+            if not poller.poll(-1):
+                continue
+            n = self.readinto(buf)
+            if n is None:
+                continue
             if not n:
                 return
             yield bytes(buf[:n])
+        
+        poller.unregister(self._sock)
     
     # Extension
     def iter_content_into(self, buf):
+        poller = select.poll()
+        poller.register(self._sock, select.POLLIN)
+        
         while True:
-            try:
-                n = self.readinto(buf)
-            except OSError as e:
-                if e.errno == errno.EAGAIN:
-                    time.sleep_ms(1)
-                    continue
-                raise
+            if not poller.poll(-1):
+                continue
+            n = self.readinto(buf)
+            if n is None:
+                continue
             if not n:
                 return
             yield n
+        
+        poller.unregister(self._sock)
     
     def readable(self):
         return True
@@ -983,13 +990,16 @@ class HTTPConnection:
                 if encode_chunked:
                     self._sendall(_CRLF)
         elif hasattr(data, "readinto"):
+            poller = select.poll()
+            poller.register(data, select.POLLIN)
             buf = memoryview(bytearray(self.blocksize))
             while True:
-                n = data.readinto(buf)  # if you need non-blocking reads, refactor as an iterator
+                if not poller.poll(-1):
+                    continue
+                n = data.readinto(buf)
                 if self.debuglevel > 0:
                     print("send:", type(data).__name__, None if n is None else n)
                 if n is None:
-                    time.sleep_ms(1)
                     continue
                 if not n:
                     break
@@ -999,15 +1009,19 @@ class HTTPConnection:
                 if encode_chunked:
                     self._sendall(_CRLF)
             del buf
+            poller.unregister(data)
         elif hasattr(data, "read"):
+            poller = select.poll()
+            poller.register(data, select.POLLIN)
             while True:
-                d = data.read(self.blocksize)  # if you need non-blocking reads, refactor as an iterator
+                if not poller.poll(-1):
+                    continue
+                d = data.read(self.blocksize)
                 if isinstance(d, str):
                     d = d.encode(_ENCODE_BODY)
                 if self.debuglevel > 0:
                     print("send:", type(d).__name__, None if d is None else len(d))
                 if d is None:
-                    time.sleep_ms(1)
                     continue
                 if not d:
                     break
@@ -1016,6 +1030,7 @@ class HTTPConnection:
                 self._sendall(d)
                 if encode_chunked:
                     self._sendall(_CRLF)
+            poller.unregister(data)
         elif isiterator(data):  # includes generators (bytes-like was handled earlier)
             for d in data:
                 if isinstance(d, str):

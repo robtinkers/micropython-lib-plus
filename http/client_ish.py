@@ -686,37 +686,39 @@ class HTTPResponse:
             raise ValueError("chunk_size must be > 0")
         buf = memoryview(bytearray(chunk_size))
         
+        sock = self._sock
         poller = select.poll()
-        poller.register(self._sock, select.POLLIN)
-        
-        while True:
-            if not poller.poll(-1):
-                continue
-            n = self.readinto(buf)
-            if n is None:
-                continue
-            if not n:
-                break
-            yield bytes(buf[:n])
-        
-        poller.unregister(self._sock)
+        poller.register(sock, select.POLLIN)
+        try:
+            while True:
+                if not poller.poll(-1):
+                    continue
+                n = self.readinto(buf)
+                if n is None:
+                    continue
+                if not n:
+                    break
+                yield bytes(buf[:n])
+        finally:
+            poller.unregister(sock)
     
     # Extension
     def iter_content_into(self, buf):
+        sock = self._sock
         poller = select.poll()
-        poller.register(self._sock, select.POLLIN)
-        
-        while True:
-            if not poller.poll(-1):
-                continue
-            n = self.readinto(buf)
-            if n is None:
-                continue
-            if not n:
-                break
-            yield n
-        
-        poller.unregister(self._sock)
+        poller.register(sock, select.POLLIN)
+        try:
+            while True:
+                if not poller.poll(-1):
+                    continue
+                n = self.readinto(buf)
+                if n is None:
+                    continue
+                if not n:
+                    break
+                yield n
+        finally:
+            poller.unregister(sock)
     
     def readable(self):
         return True
@@ -991,47 +993,51 @@ class HTTPConnection:
                 if encode_chunked:
                     self._sendall(_CRLF)
         elif hasattr(data, "readinto"):
+            buf = memoryview(bytearray(self.blocksize))
             poller = select.poll()
             poller.register(data, select.POLLIN)
-            buf = memoryview(bytearray(self.blocksize))
-            while True:
-                if not poller.poll(-1):
-                    continue
-                n = data.readinto(buf)
-                if self.debuglevel > 0:
-                    print("send:", type(data).__name__, None if n is None else n)
-                if n is None:
-                    continue
-                if not n:
-                    break
-                if encode_chunked:
-                    self._sendall(b"%X\r\n" % (n,))
-                self._sendall(buf[:n])
-                if encode_chunked:
-                    self._sendall(_CRLF)
-            del buf
-            poller.unregister(data)
+            try:
+                while True:
+                    if not poller.poll(-1):
+                        continue
+                    n = data.readinto(buf)
+                    if self.debuglevel > 0:
+                        print("send:", type(data).__name__, None if n is None else n)
+                    if n is None:
+                        continue
+                    if not n:
+                        break
+                    if encode_chunked:
+                        self._sendall(b"%X\r\n" % (n,))
+                    self._sendall(buf[:n])
+                    if encode_chunked:
+                        self._sendall(_CRLF)
+            finally:
+                del buf
+                poller.unregister(data)
         elif hasattr(data, "read"):
             poller = select.poll()
             poller.register(data, select.POLLIN)
-            while True:
-                if not poller.poll(-1):
-                    continue
-                d = data.read(self.blocksize)
-                if isinstance(d, str):
-                    d = d.encode(_ENCODE_BODY)
-                if self.debuglevel > 0:
-                    print("send:", type(d).__name__, None if d is None else len(d))
-                if d is None:
-                    continue
-                if not d:
-                    break
-                if encode_chunked:
-                    self._sendall(b"%X\r\n" % (len(d),))
-                self._sendall(d)
-                if encode_chunked:
-                    self._sendall(_CRLF)
-            poller.unregister(data)
+            try:
+                while True:
+                    if not poller.poll(-1):
+                        continue
+                    d = data.read(self.blocksize)
+                    if isinstance(d, str):
+                        d = d.encode(_ENCODE_BODY)
+                    if self.debuglevel > 0:
+                        print("send:", type(d).__name__, None if d is None else len(d))
+                    if d is None:
+                        continue
+                    if not d:
+                        break
+                    if encode_chunked:
+                        self._sendall(b"%X\r\n" % (len(d),))
+                    self._sendall(d)
+                    if encode_chunked:
+                        self._sendall(_CRLF)
+            finally:
+                poller.unregister(data)
         elif isiterator(data):  # includes generators (bytes-like was handled earlier)
             for d in data:
                 if isinstance(d, str):

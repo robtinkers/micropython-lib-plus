@@ -132,7 +132,7 @@ class HTTPMessage(NormalizedDict):
                     val = val.strip()
         return val
 
-class HTTPCookies(NormalizedDict):  # Extension
+class HTTPCookies(HTTPMessage):  # Extension
     _lower_key = const(0)  # Cookie names are case-sensitive
     
     def normalize_val(self, val):

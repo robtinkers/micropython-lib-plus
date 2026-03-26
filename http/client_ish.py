@@ -280,6 +280,7 @@ def parse_headers(sock, *, extra_headers=True, parse_cookies=None):  # returns d
         
         sep = line.find(b':')
         if sep == -1:
+            last_header = None
             continue
         key, val = line[:sep], line[sep+1:]
         key = headers.normalize_key(key)
@@ -291,6 +292,7 @@ def parse_headers(sock, *, extra_headers=True, parse_cookies=None):  # returns d
                 if sep != -1:
                     key, val = val[:sep], val[sep+1:]
                     cookies.set(key, val)  # includes any quotes and parameters
+            last_header = None
         elif extra_headers is True or (extra_headers and key in extra_headers) or key in _IMPORTANT_HEADERS:
             val = val.strip()
             old_val = headers.get_raw(key, _MISSING)
@@ -299,9 +301,8 @@ def parse_headers(sock, *, extra_headers=True, parse_cookies=None):  # returns d
             else:
                 headers.set_raw(key, val)
             last_header = key
-            continue
-        
-        last_header = None
+        else:
+            last_header = None
 
 class HTTPResponse:
     def __enter__(self):
@@ -317,7 +318,7 @@ class HTTPResponse:
         self.debuglevel = debuglevel
         self._method = method
         self.url = url
-        self.complete = False
+        self.incomplete = True
         #
         self.version = None
         self.status = None
@@ -344,14 +345,14 @@ class HTTPResponse:
                 print("cookie:", repr(key), "=", repr(val))
         
         # are we using the chunked-style of transfer encoding?
-        self.chunked = b"chunked" in self.headers.get_raw(b"transfer-encoding", _BLANK).lower()
+        self.chunked = (hh := self.headers.get_raw(b"transfer-encoding")) and b"chunked" in hh.lower()
         self.chunk_left = None
         
         # will the connection close at the end of the response?
         if self.version == 11:
-            self.will_close = b"close" in self.headers.get_raw(b"connection", _BLANK).lower()
+            self.will_close = (hh := self.headers.get_raw(b"connection")) and b"close" in hh.lower()
         else:
-            self.will_close = b"keep-alive" not in self.headers.get_raw(b"connection", _BLANK).lower() and self.headers.get_raw(b"keep-alive") is None
+            self.will_close = (not (hh := self.headers.get_raw(b"connection")) or b"keep-alive" not in hh.lower()) and self.headers.get_raw(b"keep-alive") is None
         
         # do we have a Content-Length?
         # NOTE: RFC 2616, S4.4, #3 says we ignore this if chunked
@@ -419,13 +420,12 @@ class HTTPResponse:
                 if self.debuglevel > 0:
                     print("header:", repr(line))
         
-        if version == "HTTP/1.0" or version == "HTTP/0.9":
-            # some servers might still return 0.9, treat it as 1.0 anyway
+        if version == "HTTP/1.0":
             version = 10
         elif version.startswith("HTTP/1."):
-            version = 11  # use HTTP/1.1 code for HTTP/1.x where x>=1
+            version = 11  # use HTTP/1.1 code for HTTP/1.x where x>0
         else:
-            raise BadStatusLine()
+            raise BadStatusLine()  # no support for HTTP/0.9 or HTTP/2+
         
         return version, status, reason
     
@@ -436,7 +436,7 @@ class HTTPResponse:
         if hard or self.chunk_left is not None or (self.length is not None and self.length > 0):
             pass
         else:
-            self.complete = True
+            self.incomplete = False
         if hard or self.chunk_left is not None or (self.length is not None and self.length > 0) or self.will_close:
             if self._sock is not None:
                 self._sock.close()
@@ -464,22 +464,22 @@ class HTTPResponse:
         return self._read(amt)
     
     def _read(self, arg):
-        if self.chunked:
-            chunked = self.read_chunked(arg)
-            if isinstance(chunked, list):
-                len_chunked = len(chunked)
-                if len_chunked > 1:
-                    return _BLANK.join(chunked)
-                elif len_chunked == 1:
-                    return chunked[0]
-                else:
-                    return _BLANK
-            elif isinstance(chunked, memoryview):
-                return bytes(chunked)
-            else:
-                return chunked  # bytearray or int
-        else:
+        if not self.chunked:
             return self.read_raw(arg)
+        
+        chunked = self.read_chunked(arg)
+        if isinstance(chunked, list):
+            len_chunked = len(chunked)
+            if len_chunked > 1:
+                return _BLANK.join(chunked)
+            elif len_chunked == 1:
+                return chunked[0]
+            else:
+                return _BLANK
+        elif isinstance(chunked, memoryview):
+            return bytes(chunked)
+        else:  # bytearray or int
+            return chunked
     
     def read_chunked(self, arg=None):
         arg_is_memoryview = isinstance(arg, memoryview)
@@ -778,29 +778,6 @@ class HTTPConnection:
                 self.sock.close()
                 self.sock = None
     
-    def _sendall(self, data):
-        auto_open = self._auto_open
-        self._auto_open = False
-        
-        if auto_open:
-            try:
-                self.sock.sendall(data)
-                return
-            except AttributeError:
-                pass
-            except OSError:
-                try: self.sock.close()
-                except: pass
-            self.sock = None
-            try:
-                self.connect()
-            except OSError:
-                raise NotConnected()
-        elif self.sock is None:
-            raise NotConnected()
-        
-        self.sock.sendall(data)
-    
     # derived from CPython (all bugs are mine)
     def request(self, method, url, body=None, headers=None, cookies=None,
                 *, encode_chunked=False):
@@ -941,9 +918,9 @@ class HTTPConnection:
         
         if self._buffer is None:
             if len(parts) == 1:
-                self._sendall(parts[0])
+                self.send_raw(parts[0])
             else:
-                self._sendall(_BLANK.join(parts))
+                self.send_raw(_BLANK.join(parts))
         else:
             for part in parts:
                 len_part = len(part)
@@ -951,20 +928,20 @@ class HTTPConnection:
                     self._buffer[self._filled:self._filled+len_part] = part
                     self._filled += len_part
                 else:
-                    self._sendall(self._buffer[:self._filled])
+                    self.send_raw(self._buffer[:self._filled])
                     self._filled = 0
                     if len_part >= self._buffer_size:
-                        self._sendall(part)
+                        self.send_raw(part)
                     else:
                         self._buffer[:len_part] = part
                         self._filled = len_part
         
         if last:
             if self._buffer is not None:
-                filled = self._filled
+                was_filled = self._filled
                 self._filled = 0
-                if filled:
-                    self._sendall(self._buffer[:filled])
+                if was_filled:
+                    self.send_raw(self._buffer[:was_filled])
     
     def endheaders(self, message_body=None, *, encode_chunked=False):
         if self.__state != _CS_REQ_STARTED or self.__response is not None:
@@ -975,9 +952,45 @@ class HTTPConnection:
         if message_body is not None:
             self.send(message_body, encode_chunked=encode_chunked)
     
+    def send_raw(self, data):
+        if data is None:
+            data = _BLANK
+        
+        was_auto_open = self._auto_open
+        self._auto_open = False
+        
+        if was_auto_open:
+            try:
+                self.sock.sendall(data)
+                return
+            except AttributeError:
+                pass
+            except OSError:
+                try: self.sock.close()
+                except: pass
+            self.sock = None
+            try:
+                self.connect()
+            except OSError:
+                raise NotConnected()
+        elif self.sock is None:
+            raise NotConnected()
+        
+        self.sock.sendall(data)
+    
+    def send_chunk(self, data):
+        if data is None:
+            self.send_raw(b"0\r\n\r\n")
+            return
+        self.send_raw(b"%X\r\n" % (len(data),))
+        self.send_raw(data)
+        self.send_raw(_CRLF)
+    
     def send(self, data, *, encode_chunked=False, final_chunk=True):  # encode_chunked and final_chunk are extensions
         if isinstance(data, str):
             data = data.encode(_ENCODE_BODY)
+        
+        send = self.send_chunk if encode_chunked else self.send_raw
         
         if data is None:
             if self.debuglevel > 0:
@@ -987,11 +1000,7 @@ class HTTPConnection:
             if self.debuglevel > 0:
                 print("send:", type(data).__name__, len(data))
             if data:
-                if encode_chunked:
-                    self._sendall(b"%X\r\n" % (len(data),))
-                self._sendall(data)
-                if encode_chunked:
-                    self._sendall(_CRLF)
+                send(data)
         elif hasattr(data, "readinto"):
             buf = memoryview(bytearray(self.blocksize))
             poller = select.poll()
@@ -1007,11 +1016,7 @@ class HTTPConnection:
                         continue
                     if not n:
                         break
-                    if encode_chunked:
-                        self._sendall(b"%X\r\n" % (n,))
-                    self._sendall(buf[:n])
-                    if encode_chunked:
-                        self._sendall(_CRLF)
+                    send(buf[:n])
             finally:
                 del buf
                 poller.unregister(data)
@@ -1031,11 +1036,7 @@ class HTTPConnection:
                         continue
                     if not d:
                         break
-                    if encode_chunked:
-                        self._sendall(b"%X\r\n" % (len(d),))
-                    self._sendall(d)
-                    if encode_chunked:
-                        self._sendall(_CRLF)
+                    send(d)
             finally:
                 poller.unregister(data)
         elif isiterator(data):  # includes generators (bytes-like was handled earlier)
@@ -1046,25 +1047,21 @@ class HTTPConnection:
                     if self.debuglevel > 0:
                         print("send: None")
                     continue
-                elif isinstance(d, (bytes, bytearray, memoryview)):
+                if isinstance(d, (bytes, bytearray, memoryview)):
                     if self.debuglevel > 0:
                         print("send:", type(d).__name__, len(d))
                     if not d:
                         continue
                 else:
                     raise TypeError("unexpected data")
-                if encode_chunked:
-                    self._sendall(b"%X\r\n" % (len(d),))
-                self._sendall(d)
-                if encode_chunked:
-                    self._sendall(_CRLF)
+                send(d)
         else:
             raise TypeError("unexpected data")
         
         if encode_chunked and final_chunk:
             if self.debuglevel > 0:
                 print("send: terminating chunk")
-            self._sendall(b"0\r\n\r\n")
+            send(None)
     
     def getresponse(self, **kwargs):
         if self.__response is not None and self.__response.isclosed():

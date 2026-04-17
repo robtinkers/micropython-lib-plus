@@ -1,6 +1,6 @@
 # http/client_ish.py
 
-import micropython, socket, select
+import micropython, socket, select, time
 
 HTTP_PORT = const(80)
 HTTPS_PORT = const(443)
@@ -12,11 +12,9 @@ _CS_IDLE = const(0)
 _CS_REQ_STARTED = const(1)
 _CS_REQ_SENT = const(2)
 
-# We always set the Content-Length header for these methods because some
-# servers will otherwise respond with a 411
-_METHODS_EXPECTING_BODY = frozenset({"PATCH", "POST", "PUT"})
+_METHODS_EXPECTING_BODY = ("PATCH", "POST", "PUT")
 
-_IMPORTANT_HEADERS = frozenset({
+_IMPORTANT_HEADERS = (
     b"connection",  # required
     b"content-encoding",
     b"content-length",  # required
@@ -27,7 +25,7 @@ _IMPORTANT_HEADERS = frozenset({
     b"retry-after",
     b"transfer-encoding",  # required
     b"www-authenticate",
-})
+)
 
 _DECODE_HEAD = const("utf-8")  # micropython doesn't support iso-8859-1
 _ENCODE_HEAD = const("utf-8")  # micropython doesn't support iso-8859-1
@@ -41,10 +39,12 @@ _MISSING = object()  # sentinel
 
 class NormalizedDict(dict):
     
-    def normalize_key(self, key):
+    @classmethod
+    def normalize_key(cls, key):
         return key
     
-    def normalize_val(self, val):
+    @classmethod
+    def normalize_val(cls, val):
         return val
     
     def __contains__(self, key):
@@ -76,6 +76,16 @@ class NormalizedDict(dict):
     def get_raw(self, key, default=None):
         return super().get(key, default)
     
+    def get_raw_bytes(self, key, default=None):
+        val = self.get_raw(key, _MISSING)
+        if val is _MISSING:
+            return default
+        if isinstance(val, bytes):
+            return val
+        if isinstance(val, str):
+            return val.encode(_ENCODE_HEAD)
+        return bytes(val)
+    
     def get(self, key, default=None):
         key = self.normalize_key(key)
         val = self.get_raw(key, _MISSING)
@@ -93,37 +103,35 @@ class NormalizedDict(dict):
             return default
         return self.normalize_val(val)
     
-    def __iter__(self):
-        for key in super().__iter__():
-            yield self.normalize_key(key)
-    
-    def keys(self):
-        for key in super().keys():
-            yield self.normalize_key(key)
-    
     def values(self):
         for val in super().values():
             yield self.normalize_val(val)
     
     def items(self):
         for key, val in super().items():
-            yield self.normalize_key(key), self.normalize_val(val)
+            yield key, self.normalize_val(val)
 
 class HTTPMessage(NormalizedDict):
-    _lower_key = const(1)  # Header names are case-insensitive
+    _lower_key = 1  # Header names are case-insensitive
     
-    def normalize_key(self, key):
+    @classmethod
+    def normalize_key(cls, key):
         if isinstance(key, str):
             key = key.encode(_ENCODE_HEAD)
+        elif isinstance(key, memoryview):
+            key = bytes(key)
         if isinstance(key, (bytes, bytearray)):
             if key:
                 if key[0] <= 32 or key[-1] <= 32:
                     key = key.strip()
-            if key and self._lower_key:
+            if key and cls._lower_key:
                 key = key.lower()
         return key
     
-    def normalize_val(self, val):
+    @classmethod
+    def normalize_val(cls, val):
+        if isinstance(val, memoryview):
+            val = bytes(val)
         if isinstance(val, (bytes, bytearray)):
             val = val.decode(_DECODE_HEAD)
         if isinstance(val, str):
@@ -133,45 +141,66 @@ class HTTPMessage(NormalizedDict):
         return val
 
 class HTTPCookies(HTTPMessage):  # Extension
-    _lower_key = const(0)  # Cookie names are case-sensitive
+    _lower_key = 0  # Cookie names are case-sensitive
     
-    def normalize_val(self, val):
+    @classmethod
+    def normalize_val(cls, val):
+        if isinstance(val, memoryview):
+            val = bytes(val)
         if isinstance(val, (bytes, bytearray)):
             val = val.decode(_DECODE_HEAD)
-        if isinstance(val, str):
+        if not isinstance(val, str) or val == "":
+            return val
+        
+        if val[0].isspace() or val[-1].isspace():
+            val = val.strip()
+        if val.startswith('"'):
+            sep = val.find('"', 1)
+            if sep != -1:
+                val = val[1:sep]
+        else:
             sep = val.find(";")
             if sep != -1:
-                val = val[:sep]
-            if val:
-                if val[0].isspace() or val[-1].isspace():
-                    val = val.strip()
-            if val:
-                if val[0] == '"' and val[-1] == '"':
-                    val = val[1:-1]
+                val = val[0:sep]
+            val = val.strip()
+        
         return val
     
     def attributes(self, key):
         key = self.normalize_key(key)
-        val = self.get_raw(key, _MISSING)
+        val = self.get_raw_bytes(key, _MISSING)
         if val is _MISSING:
             raise KeyError(key)
+        attrs = {}
+
+        if isinstance(val, memoryview):
+            val = bytes(val)
         if isinstance(val, (bytes, bytearray)):
             val = val.decode(_DECODE_HEAD)
-        attrs = {}
-        for attr in val.split(";")[1:]:
+        if not isinstance(val, str) or val == "":
+            return attrs
+        
+        if val[0].isspace() or val[-1].isspace():
+            val = val.strip()
+        if val.startswith('"'):
+            sep = val.find('"', 1)
+            if sep != -1:
+                val = val[sep+1:]
+        else:
+            sep = val.find(";")
+            if sep != -1:
+                val = val[sep:]
+        
+        for attr in val.split(";"):
             sep = attr.find("=")
             if sep != -1:
                 k, v = attr[:sep], attr[sep+1:]
-                if v and (v[0] <= ' ' or v[-1] <= ' '):
-                    v = v.strip()
-                if v and (v[0] == '"' and v[-1] == '"'):
-                    v = v[1:-1]
+                k, v = k.strip(), v.strip()
             else:
-                k, v = attr, True
-            if k and (k[0] <= ' ' or k[-1] <= ' '):
-                k = k.strip()
-            if k or v is not True:
-                attrs[k] = v
+                k, v = attr.strip(), True
+                if not k:
+                    continue
+            attrs[k] = v
         return attrs
 
 class HTTPException(Exception): pass
@@ -191,28 +220,31 @@ def isiterator(x):
         return False
 
 @micropython.viper
-def _is_visible_ascii(buf:ptr8, buflen:int) -> int:
+def _validate_ascii(buf:ptr8, buflen:int, allow_space:int) -> int:
     i = 0
     while i < buflen:
-        if buf[i] < 32 or buf[i] >= 127:
+        b = buf[i]
+        if b < 32 or b >= 127:
+            return 0
+        if b == 32 and allow_space == 0:
             return 0
         i += 1
     return 1
 
-def _encode_and_validate(b, *args):
-    if isinstance(b, str):
-        b = b.encode(*args)
-    elif isinstance(b, bytes):
+def _encode_and_validate(b, charset, *, allow_space=1, force_bytes=False):
+    if isinstance(b, (bytes, bytearray, memoryview)):
         pass
-    elif isinstance(b, (bytearray, memoryview)):
-        b = bytes(b)
+    elif isinstance(b, str):
+        b = b.encode(charset)
     elif isinstance(b, int):
-        return str(b).encode(*args)
+        return str(b).encode(charset)
     else:
         raise TypeError("must be bytes-like or int")
-    if _is_visible_ascii(b, len(b)) == 0:
-        raise ValueError("can't contain control characters")
-    return b
+    if _validate_ascii(b, len(b), allow_space) == 0:
+        raise ValueError("can't contain special characters")
+    if not force_bytes or isinstance(b, bytes):
+        return b
+    return bytes(b)
 
 def _create_connection(address, timeout):
     host, port = address
@@ -237,17 +269,24 @@ def create_connection(address, timeout=None):
     return _create_connection(address, timeout)
 
 # derived from CPython (all bugs are mine)
-def parse_host_port(host, port):
+def parse_host_port(host, port, default_port=None):
     if port is None:
         i = host.rfind(':')
         j = host.rfind(']')
         if i > j:
+            port_str = host[i+1:]
             try:
-                port = int(host[i+1:], 10)
+                port = int(port_str, 10)
+                if port <= 0:
+                    raise ValueError("port must be > 0")
             except ValueError:
-                if host[i+1:] != "":
+                if port_str == "":
+                    port = default_port
+                else:
                     raise
             host = host[:i]
+        else:
+            port = default_port
     if host and host[0] == '[' and host[-1] == ']':
         host = host[1:-1]
     return (host, port)
@@ -265,7 +304,7 @@ def parse_headers(sock, *, extra_headers=True, parse_cookies=None):  # returns d
     
     while True:
         line = sock.readline()
-        if not line or line == _CRLF or line == b'\n':
+        if not line or line == _CRLF or line == b"\n":
             if parse_cookies is not None:
                 return headers, cookies
             else:
@@ -273,7 +312,7 @@ def parse_headers(sock, *, extra_headers=True, parse_cookies=None):  # returns d
         
         if line.startswith((b' ', b'\t')):
             if last_header is not None:
-                old_val = headers.get_raw(last_header, _MISSING)
+                old_val = headers.get_raw_bytes(last_header, _MISSING)
                 if old_val is not _MISSING:
                     headers.set_raw(last_header, old_val + b" " + line.strip())
             continue
@@ -286,7 +325,7 @@ def parse_headers(sock, *, extra_headers=True, parse_cookies=None):  # returns d
         key = headers.normalize_key(key)
         
         if key == b"set-cookie":
-            if parse_cookies is True:
+            if parse_cookies:
                 val = val.strip()
                 sep = val.find(b'=')
                 if sep != -1:
@@ -295,7 +334,7 @@ def parse_headers(sock, *, extra_headers=True, parse_cookies=None):  # returns d
             last_header = None
         elif extra_headers is True or (extra_headers and key in extra_headers) or key in _IMPORTANT_HEADERS:
             val = val.strip()
-            old_val = headers.get_raw(key, _MISSING)
+            old_val = headers.get_raw_bytes(key, _MISSING)
             if old_val is not _MISSING:
                 headers.set_raw(key, old_val + b", " + val)
             else:
@@ -317,7 +356,7 @@ class HTTPResponse:
         self._sock = sock
         self.debuglevel = debuglevel
         self._method = method
-        self.url = url
+        self._url = url
         self.complete = False
         #
         self.version = None
@@ -328,16 +367,15 @@ class HTTPResponse:
         self.chunked = False
         self.chunk_left = None
         self.will_close = True
-        self.length = 0
+        self.content_length = None
+        self.content_read = 0
     
     def begin(self, *, extra_headers=True, parse_cookies=False):
         self.version, self.status, self.reason = self._read_status()
         if self.debuglevel > 0:
             print("status:", repr(self.version), repr(self.status), repr(self.reason))
         
-        if parse_cookies is None:
-            parse_cookies = False
-        self.headers, self.cookies = parse_headers(self._sock, extra_headers=extra_headers, parse_cookies=parse_cookies)
+        self.headers, self.cookies = parse_headers(self._sock, extra_headers=extra_headers, parse_cookies=bool(parse_cookies))
         if self.debuglevel > 0:
             for key, val in self.headers.items():
                 print("header:", repr(key), "=", repr(val))
@@ -345,40 +383,48 @@ class HTTPResponse:
                 print("cookie:", repr(key), "=", repr(val))
         
         # are we using the chunked-style of transfer encoding?
-        self.chunked = (hh := self.headers.get_raw(b"transfer-encoding")) and b"chunked" in hh.lower()
+        self.chunked = (self.headers.get_raw_bytes(b"transfer-encoding") == b"chunked")
         self.chunk_left = None
         
         # will the connection close at the end of the response?
-        if self.version == 11:
-            self.will_close = (hh := self.headers.get_raw(b"connection")) and b"close" in hh.lower()
+        conn = self.headers.get_raw_bytes(b"connection")
+        conn = conn.lower() if conn else b""
+        if self.version == 10:
+            if b"keep-alive" in conn:
+                self.will_close = False
+            else:
+                self.will_close = (self.headers.get_raw_bytes(b"keep-alive") is None)
         else:
-            self.will_close = (not (hh := self.headers.get_raw(b"connection")) or b"keep-alive" not in hh.lower()) and self.headers.get_raw(b"keep-alive") is None
+            self.will_close = b"close" in conn
         
         # do we have a Content-Length?
         # NOTE: RFC 2616, S4.4, #3 says we ignore this if chunked
-        self.length = None
-        length = self.headers.get_raw(b"content-length")
+        self.content_length = None
+        length = self.headers.get_raw_bytes(b"content-length")
         if length and not self.chunked:
             try:
-                self.length = int(length, 10)
+                self.content_length = int(length, 10)
             except ValueError:
-                pass  # self.length is already None
+                pass  # self.content_length is already None
             else:
-                if self.length < 0:  # ignore nonsensical negative lengths
-                    self.length = None
+                if self.content_length < 0:  # ignore nonsensical negative lengths
+                    self.content_length = None
+        self.content_read = 0
         
         # does the body have a fixed length? (of zero)
-        if (self.status == 204 or self.status == 304 or
-            100 <= self.status < 200 or
-            self._method == "HEAD"):
-            self.length = 0
+        if (100 <= self.status < 200
+            or self.status == 204 or self.status == 304
+            or self._method == "HEAD"):
+            self.content_length = 0
+            self.chunked = False
+            self.chunk_left = None
         
         # if the connection remains open, and we aren't using chunked, and
         # a content-length was not provided, then assume that the connection
         # WILL close.
         if (not self.will_close and
             not self.chunked and
-            self.length is None):
+            self.content_length is None):
             self.will_close = True
     
     def _read_status(self):
@@ -387,7 +433,7 @@ class HTTPResponse:
             line = self._sock.readline()
             if self.debuglevel > 0:
                 print("status:", repr(line))
-            if not line or not line.endswith(_CRLF):
+            if not line or not line.endswith(b'\n'):
                 raise RemoteDisconnected()
             if not line.startswith(b"HTTP/"):
                 raise BadStatusLine()
@@ -415,7 +461,7 @@ class HTTPResponse:
             # skip the header from the 100 response
             while True:
                 line = self._sock.readline()
-                if not line or line == _CRLF:
+                if not line or line == _CRLF or line == b"\n":
                     break
                 if self.debuglevel > 0:
                     print("header:", repr(line))
@@ -433,16 +479,22 @@ class HTTPResponse:
         self._close(False)
     
     def _close(self, hard):
-        if hard or self.chunk_left is not None or (self.length is not None and self.length > 0):
-            pass
-        else:
+        incomplete = (
+            hard
+            or self.chunk_left is not None
+            or (self.content_length is not None and self.content_read < self.content_length)
+        )
+        if not incomplete:
             self.complete = True
-        if hard or self.chunk_left is not None or (self.length is not None and self.length > 0) or self.will_close:
-            if self._sock is not None:
-                self._sock.close()
-            self.chunk_left = None
-            self.length = 0
+        
+        sock = self._sock
         self._sock = None
+        
+        if sock is not None and (incomplete or self.will_close):
+            try:
+                sock.close()
+            except OSError:
+                pass
     
     def isclosed(self):
         return self._sock is None
@@ -450,6 +502,10 @@ class HTTPResponse:
     @property
     def closed(self):
         return self.isclosed()
+    
+    @property
+    def length(self):
+        return self.content_length
     
     def readinto(self, buf):
         if not isinstance(buf, memoryview):
@@ -499,14 +555,12 @@ class HTTPResponse:
             res_is_memoryview = True
         total = 0
         
-        sock = self._sock  # fewer attribute lookups below
-        
         while not self.isclosed():
             
             if self.chunk_left is None:
                 # Need to read a new chunk header
-                line = sock.readline()
-                if not line.endswith(_CRLF):
+                line = self._sock.readline()
+                if not line.endswith(b'\n'):
                     # Malformed data: invalid chunk header
                     self._close(True)
                     break
@@ -527,17 +581,16 @@ class HTTPResponse:
                 if self.chunk_left == 0:
                     # Final chunk: consume trailers until blank line, then done
                     while True:
-                        line = sock.readline()
-                        if line == _CRLF:
+                        line = self._sock.readline()
+                        if not line:
+                            # Malformed data: missing CRLF after final chunk (premature EOF)
+                            self._close(True)
+                            break
+                        if line == _CRLF or line == b"\n":
                             # End of Content
                             self.chunk_left = None
-                            self.length = 0
+                            self.close()
                             break
-                        if line == _BLANK:
-                            # Malformed data: missing CRLF after final chunk (premature EOF)
-                            break
-                    self.close()
-                    break
             
             nread = 0
             
@@ -545,35 +598,36 @@ class HTTPResponse:
                 to_read = min(self.chunk_left, len(res) - total)
                 if to_read <= 0:
                     break # buffer full, not EOF
-                nread = sock.readinto(res[total:total+to_read])
-                if nread is None:
+                nread = self._sock.readinto(res[total:total+to_read])
+                if nread is None or nread < 0:
                     break  # ???
             else:
                 to_read = self.chunk_left
                 if to_read > 0:
-                    chunk = sock.read(to_read)
+                    chunk = self._sock.read(to_read)
                     if chunk is None:
                         break  # ???
                     if chunk:
                         res.append(chunk)
                         nread = len(chunk)
             
-            if nread <= 0:
+            if nread == 0:
                 # EOF
-                self._close(True)
+                self._close(True)  # ???
                 break
             
+            self.content_read += nread
             total += nread
             self.chunk_left -= nread
             
             if self.chunk_left == 0:
-                # We finished the chunk: validate trailing CRLF immediately.
-                crlf = sock.read(2)
-                if crlf != _CRLF:
-                    # Malformed data: missing CRLF after this chunk
+                # We finished the chunk: validate trailing LF/CRLF immediately.
+                if (cr := self._sock.read(1)) == b"\n" or (cr == b"\r" and self._sock.read(1) == b"\n"):
+                    self.chunk_left = None  # ready for next chunk header
+                else:
+                    # Malformed data: missing LF/CRLF after this chunk
                     self._close(True)
                     break
-                self.chunk_left = None  # ready for next chunk header
         
         if arg_is_memoryview:
             return total # an integer
@@ -589,78 +643,84 @@ class HTTPResponse:
     def read_raw(self, arg=None):
         arg_is_memoryview = isinstance(arg, memoryview)
         
-        if arg_is_memoryview:
+        if arg is None:
+            pass
+        elif arg_is_memoryview:
             if len(arg) == 0:
                 return 0
-        elif arg is None:
-            pass
         else:
             assert isinstance(arg, int)
             if arg <= 0:
                 return _BLANK
         
         if self.isclosed():
-            # End of Content/File
+            # End of File
             if arg_is_memoryview:
                 return 0
             return _BLANK
         
-        elif self.length is None:
+        if self.content_length is None:
             # no Content-Length header
-            if arg_is_memoryview:
-                to_read = len(arg)
-            elif arg is None:
+            if arg is None:
                 res = self._sock.read()
                 if res is None:
-                    return None
+                    return _BLANK
+                self.content_read += len(res)
                 self.close()
                 return res
+            elif arg_is_memoryview:
+                to_read = len(arg)
             else:
                 to_read = arg
+        else:
+            if arg is None:
+                to_read = self.content_length - self.content_read
+            elif arg_is_memoryview:
+                to_read = min(self.content_length - self.content_read, len(arg))
+            else:
+                to_read = min(self.content_length - self.content_read, arg)
         
-        elif self.length <= 0:
-            # End of Content
-            self.close()
+        if to_read < 0:
+            # Malformed data: read more than Content-Length
+            self._close(True)
             if arg_is_memoryview:
                 return 0
             return _BLANK
-        
-        else:
-            if arg_is_memoryview:
-                to_read = min(self.length, len(arg))
-            elif arg is None:
-                to_read = self.length
-            else:
-                to_read = min(self.length, arg)
         
         if arg_is_memoryview:
             nread = self._sock.readinto(arg[:to_read])
-            if nread is None:
-                return None  # ???
-        else:
-            res = self._sock.read(to_read)
-            if res is None:
-                return None  # ???
-            nread = len(res)
-        
-        if nread <= 0:
-            # EOF
-            if self.length is not None and self.length > 0:
-                self._close(True)
-            else:
-                self.close()
-        elif self.length is not None:
-            self.length -= nread
-            if self.length <= 0:
+            if nread is None or nread < 0:
+                nread = 0
+            elif nread == 0:
                 # End of Content
                 self.close()
+            else:
+                self.content_read += nread
+        else:
+            res = self._sock.read(to_read)
+            nread = None if res is None else len(res)
+            if nread is None:
+                nread = 0
+            elif nread == 0:
+                # End of Content
+                self.close()
+            else:
+                self.content_read += nread
+        
+        if self.content_length is not None:
+            if self.content_read == self.content_length:
+                # End of Content
+                self.close()
+            elif self.content_read > self.content_length:
+                # Malformed data: read more than Content-Length
+                self._close(True)
         
         if arg_is_memoryview:
             return nread
         return res
     
     def geturl(self):
-        return self.url
+        return self._url
     
     def getcode(self):
         return self.status
@@ -686,9 +746,8 @@ class HTTPResponse:
             raise ValueError("chunk_size must be > 0")
         buf = memoryview(bytearray(chunk_size))
         
-        sock = self._sock
         poller = select.poll()
-        poller.register(sock, select.POLLIN)
+        poller.register(self._sock, select.POLLIN)  #TODO: check that this works with SSL-wrapped sockets
         try:
             while True:
                 if not poller.poll(-1):
@@ -700,13 +759,13 @@ class HTTPResponse:
                     break
                 yield bytes(buf[:n])
         finally:
-            poller.unregister(sock)
+            if self._sock is not None:
+                poller.unregister(self._sock)
     
     # Extension
     def iter_content_into(self, buf):
-        sock = self._sock
         poller = select.poll()
-        poller.register(sock, select.POLLIN)
+        poller.register(self._sock, select.POLLIN)  #TODO: check that this works with SSL-wrapped sockets
         try:
             while True:
                 if not poller.poll(-1):
@@ -718,7 +777,8 @@ class HTTPResponse:
                     break
                 yield n
         finally:
-            poller.unregister(sock)
+            if self._sock is not None:
+                poller.unregister(self._sock)
     
     def readable(self):
         return True
@@ -739,11 +799,9 @@ class HTTPConnection:
         return False
     
     def __init__(self, host, port=None, timeout=None, source_address=None, blocksize=1024):
-        self.host, self.port = parse_host_port(host, port)
+        self.host, self.port = parse_host_port(host, port, self.default_port)
         if not self.host:
             raise ValueError("invalid host")
-        if self.port is None:
-            self.port = self.default_port
         self.timeout = timeout
 #        self.source_address = source_address  # not used
         self.blocksize = blocksize
@@ -751,6 +809,7 @@ class HTTPConnection:
         self.__response = None
         self.__state = _CS_IDLE
         self._auto_open = False
+        self._sent_data = False
         if self._buffer_size:
             self._buffer = memoryview(bytearray(self._buffer_size))
         else:
@@ -790,24 +849,20 @@ class HTTPConnection:
         have_transfer_encoding = False
         
         if headers is not None:
-            if hasattr(headers, 'keys') and callable(headers.keys):
+            if hasattr(headers, "keys") and callable(headers.keys):
                 keys = headers.keys()
             else:
-                keys = (header[0] for header in headers) # generator
+                keys = (header[0] for header in headers)  # generator
             for key in keys:
-                try:
-                    if isinstance(key, (bytes, bytearray)):
-                        key = key.decode(_DECODE_HEAD)
-                except UnicodeError:
-                    continue
-                key = key.lower()
-                if key == "accept-encoding":
+                if not isinstance(headers, HTTPMessage):
+                    key = HTTPMessage.normalize_key(key)  # class method
+                if key == b"accept-encoding":
                     have_accept_encoding = True
-                elif key == "content-length":
+                elif key == b"content-length":
                     have_content_length = True
-                elif key == "host":
+                elif key == b"host":
                     have_host = True
-                elif key == "transfer-encoding":
+                elif key == b"transfer-encoding":
                     have_transfer_encoding = True
         
         self.putrequest(method, url, skip_accept_encoding=have_accept_encoding, skip_host=have_host)
@@ -831,7 +886,7 @@ class HTTPConnection:
                 if body is None:
                     # do an explicit check for not None here to distinguish
                     # between unset and set but empty
-                    if method != "GET" and method.upper() in _METHODS_EXPECTING_BODY:
+                    if self._method in _METHODS_EXPECTING_BODY:
                         content_length = 0
                     else:
                         content_length = None
@@ -862,12 +917,21 @@ class HTTPConnection:
         if self.__state != _CS_IDLE:
             raise CannotSendRequest()
         self.__state = _CS_REQ_STARTED
-        
+
+        self._auto_open = self.auto_open
+        self._sent_data = False
         self._filled = 0
-        self._method = method
-        self._url = url or "/"
         
-        self._putheaderparts(_encode_and_validate(self._method, _ENCODE_HEAD), b" ", _encode_and_validate(self._url, _ENCODE_HEAD), b" HTTP/1.1\r\n", first=True)
+        # Trust the method name from the caller
+        method = _encode_and_validate(method, "ascii", allow_space=0, force_bytes=True)
+        if method == b"GET":
+            self._method = "GET"
+        else:
+            self._method = method.upper().decode("ascii")
+        self._url = url
+        url = _encode_and_validate(url, _ENCODE_HEAD, allow_space=0) if url else b"/"
+        
+        self._putheaderparts(method, b" ", url, b" HTTP/1.1\r\n")
         
         # Issue some standard headers for better HTTP/1.1 compliance
         if not skip_host:
@@ -888,9 +952,10 @@ class HTTPConnection:
                 self.putheader(key, val)
         
         if cookies is not None:
+            # Trust the cookie names and values from the caller
             values = []
             for key, val in cookies.items():
-                values.append(b"%s=%s" % (_encode_and_validate(key, _ENCODE_HEAD), _encode_and_validate(val, _ENCODE_HEAD)))
+                values.append(b"%s=%s" % (_encode_and_validate(key, _ENCODE_HEAD, force_bytes=True), _encode_and_validate(val, _ENCODE_HEAD, force_bytes=True)))
             if len(values) == 1:
                 self.putheader(b"Cookie", values[0])
             elif len(values):
@@ -900,9 +965,9 @@ class HTTPConnection:
         if self.__state != _CS_REQ_STARTED or self.__response is not None:
             raise CannotSendHeader()
         
+        # Trust the header names from the caller, but check the header values
         if isinstance(header, str):
             header = header.encode(_ENCODE_HEAD)
-        
         parts = [header, b": "]
         for i in range(len(values)):
             if i > 0:
@@ -911,11 +976,7 @@ class HTTPConnection:
         parts.append(_CRLF)
         self._putheaderparts(*parts)
     
-    def _putheaderparts(self, *parts, first=False, last=False):
-        if first:
-            self._auto_open = self.auto_open
-            self._filled = 0
-        
+    def _putheaderparts(self, *parts, last=False):
         if self._buffer is None:
             if len(parts) == 1:
                 self.send_raw(parts[0])
@@ -948,6 +1009,7 @@ class HTTPConnection:
             raise CannotSendHeader()
         
         self._putheaderparts(_CRLF, last=True)
+        self._auto_open = False
         self.__state = _CS_REQ_SENT
         if message_body is not None:
             self.send(message_body, encode_chunked=encode_chunked)
@@ -956,27 +1018,28 @@ class HTTPConnection:
         if data is None:
             data = _BLANK
         
-        was_auto_open = self._auto_open
-        self._auto_open = False
-        
-        if was_auto_open:
+        if self._auto_open and not self._sent_data:
             try:
-                self.sock.sendall(data)
-                return
-            except AttributeError:
-                pass
+                if self.sock is not None:
+                    if self.sock.sendall(data):
+                        self._sent_data = True
+                    return
             except OSError:
                 try: self.sock.close()
                 except: pass
-            self.sock = None
+                self.sock = None
             try:
                 self.connect()
             except OSError:
                 raise NotConnected()
-        elif self.sock is None:
-            raise NotConnected()
+            if self.sock.sendall(data):
+                self._sent_data = True
+            return
         
-        self.sock.sendall(data)
+        if self.sock is None:
+            raise NotConnected()
+        if self.sock.sendall(data):
+            self._sent_data = True
     
     def send_chunk(self, data):
         if data is None:
@@ -1003,42 +1066,29 @@ class HTTPConnection:
                 send(data)
         elif hasattr(data, "readinto"):
             buf = memoryview(bytearray(self.blocksize))
-            poller = select.poll()
-            poller.register(data, select.POLLIN)
-            try:
-                while True:
-                    if not poller.poll(-1):
-                        continue
-                    n = data.readinto(buf)
-                    if self.debuglevel > 0:
-                        print("send:", type(data).__name__, None if n is None else n)
-                    if n is None:
-                        continue
-                    if not n:
-                        break
-                    send(buf[:n])
-            finally:
-                del buf
-                poller.unregister(data)
+            while True:
+                n = data.readinto(buf)
+                if self.debuglevel > 0:
+                    print("send:", type(data).__name__, None if n is None else n)
+                if n is None or n < 0:
+                    time.sleep_ms(1)
+                    continue
+                if not n:
+                    break
+                send(buf[:n])
         elif hasattr(data, "read"):
-            poller = select.poll()
-            poller.register(data, select.POLLIN)
-            try:
-                while True:
-                    if not poller.poll(-1):
-                        continue
-                    d = data.read(self.blocksize)
-                    if isinstance(d, str):
-                        d = d.encode(_ENCODE_BODY)
-                    if self.debuglevel > 0:
-                        print("send:", type(d).__name__, None if d is None else len(d))
-                    if d is None:
-                        continue
-                    if not d:
-                        break
-                    send(d)
-            finally:
-                poller.unregister(data)
+            while True:
+                d = data.read(self.blocksize)
+                if isinstance(d, str):
+                    d = d.encode(_ENCODE_BODY)
+                if self.debuglevel > 0:
+                    print("send:", type(d).__name__, None if d is None else len(d))
+                if d is None:
+                    time.sleep_ms(1)
+                    continue
+                if not d:
+                    break
+                send(d)
         elif isiterator(data):  # includes generators (bytes-like was handled earlier)
             for d in data:
                 if isinstance(d, str):

@@ -1,6 +1,6 @@
 # http/client_ish.py
 
-import micropython, socket, select, time
+import micropython, socket, time
 
 HTTP_PORT = const(80)
 HTTPS_PORT = const(443)
@@ -12,6 +12,8 @@ _CS_IDLE = const(0)
 _CS_REQ_STARTED = const(1)
 _CS_REQ_SENT = const(2)
 
+# We always set the Content-Length header for these methods because some
+# servers will otherwise respond with a 411
 _METHODS_EXPECTING_BODY = ("PATCH", "POST", "PUT")
 
 _IMPORTANT_HEADERS = (
@@ -104,12 +106,10 @@ class NormalizedDict(dict):
         return self.normalize_val(val)
     
     def values(self):
-        for val in super().values():
-            yield self.normalize_val(val)
+        return [self.normalize_val(val) for val in super().values()]
     
     def items(self):
-        for key, val in super().items():
-            yield key, self.normalize_val(val)
+        return [(key, self.normalize_val(val)) for key, val in super().items()]
 
 class HTTPMessage(NormalizedDict):
     _lower_key = 1  # Header names are case-insensitive
@@ -383,7 +383,7 @@ class HTTPResponse:
                 print("cookie:", repr(key), "=", repr(val))
         
         # are we using the chunked-style of transfer encoding?
-        self.chunked = (self.headers.get_raw_bytes(b"transfer-encoding") == b"chunked")
+        self.chunked = (b"chunked" in self.headers.get_raw_bytes(b"transfer-encoding", b"").lower())
         self.chunk_left = None
         
         # will the connection close at the end of the response?
@@ -510,32 +510,19 @@ class HTTPResponse:
     def readinto(self, buf):
         if not isinstance(buf, memoryview):
             buf = memoryview(buf)
-        return self._read(buf)
+        if self.chunked:
+            return self.read_chunked(buf)
+        else:
+            return self.read_raw(buf)
     
     def read(self, amt=None):
-        if amt is not None:
-            amt = int(amt)
-            if amt < 0:
-                amt = None
-        return self._read(amt)
-    
-    def _read(self, arg):
-        if not self.chunked:
-            return self.read_raw(arg)
-        
-        chunked = self.read_chunked(arg)
-        if isinstance(chunked, list):
-            len_chunked = len(chunked)
-            if len_chunked > 1:
-                return _BLANK.join(chunked)
-            elif len_chunked == 1:
-                return chunked[0]
-            else:
-                return _BLANK
-        elif isinstance(chunked, memoryview):
-            return bytes(chunked)
-        else:  # bytearray or int
-            return chunked
+        if self.chunked:
+            buf = self.read_chunked(amt)
+        else:
+            buf = self.read_raw(amt)
+        if isinstance(buf, bytes):
+            return buf
+        return bytes(buf)
     
     def read_chunked(self, arg=None):
         arg_is_memoryview = isinstance(arg, memoryview)
@@ -544,180 +531,195 @@ class HTTPResponse:
             if len(arg) == 0:
                 return 0
             res = arg
-        elif arg is None:
-            res = []
-        else:
-            assert isinstance(arg, int)
-            if arg <= 0:
-                return []
-            buf = bytearray(arg)
-            res = memoryview(buf)
-            res_is_memoryview = True
+        elif arg is not None:
+            arg = int(arg)
+            if arg < 0:
+                arg = None
+            elif arg == 0:
+                return _BLANK
+            else:
+                buf = bytearray(arg)
+                res = memoryview(buf)
+                res_is_memoryview = True
         total = 0
         
-        while not self.isclosed():
-            
-            if self.chunk_left is None:
-                # Need to read a new chunk header
-                line = self._sock.readline()
-                if not line.endswith(b'\n'):
-                    # Malformed data: invalid chunk header
-                    self._close(True)
-                    break
-                
+        if self.isclosed():
+            if arg_is_memoryview:
+                return 0
+            elif res_is_memoryview:
+                return res[:0]
+            else:
+                return _BLANK
+        
+        if self.chunk_left is None:
+            # Need to read a new chunk header
+            line = self._sock.readline()
+            if not line.endswith(b'\n'):
+                # Malformed data: invalid chunk header
+                self._close(True)
+            else:
                 # Strip chunk extensions
                 try:
                     self.chunk_left = int(line.split(b';')[0].strip(), 16)
                 except ValueError:
                     # Malformed data: invalid chunk size
                     self._close(True)
-                    break
-                
-                if self.chunk_left < 0:
-                    # Malformed data: negative chunk size
-                    self._close(True)
-                    break
-                
-                if self.chunk_left == 0:
-                    # Final chunk: consume trailers until blank line, then done
-                    while True:
-                        line = self._sock.readline()
-                        if not line:
-                            # Malformed data: missing CRLF after final chunk (premature EOF)
-                            self._close(True)
-                            break
-                        if line == _CRLF or line == b"\n":
-                            # End of Content
-                            self.chunk_left = None
-                            self.close()
-                            break
-            
-            nread = 0
-            
+                else:
+                    if self.chunk_left < 0:
+                        # Malformed data: negative chunk size
+                        self._close(True)
+                    elif self.chunk_left == 0:
+                        # Final chunk: consume trailers until blank line, then done
+                        while True:
+                            line = self._sock.readline()
+                            if not line:
+                                # Malformed data: missing CRLF after final chunk (premature EOF)
+                                self._close(True)
+                                break
+                            if line == _CRLF or line == b"\n":
+                                # End of Content
+                                self.chunk_left = None
+                                self.close()
+                                break
+        
+        chunk = None  # for the bytes-return path
+        
+        if not self.isclosed() and self.chunk_left:
+            # Read up to one socket recv's worth of body data.
             if arg_is_memoryview or res_is_memoryview:
                 to_read = min(self.chunk_left, len(res) - total)
-                if to_read <= 0:
-                    break # buffer full, not EOF
-                nread = self._sock.readinto(res[total:total+to_read])
-                if nread is None or nread < 0:
-                    break  # ???
-            else:
-                to_read = self.chunk_left
                 if to_read > 0:
-                    chunk = self._sock.read(to_read)
-                    if chunk is None:
-                        break  # ???
-                    if chunk:
-                        res.append(chunk)
-                        nread = len(chunk)
+                    nread = self._sock.readinto(res[total:total+to_read])
+                    if not nread:
+                        # EOF mid-chunk
+                        self._close(True)
+                    else:
+                        self.content_read += nread
+                        total += nread
+                        self.chunk_left -= nread
+            else:
+                chunk = self._sock.read(self.chunk_left)
+                if not chunk:
+                    # EOF mid-chunk
+                    self._close(True)
+                    chunk = None
+                else:
+                    nread = len(chunk)
+                    self.content_read += nread
+                    total += nread
+                    self.chunk_left -= nread
             
-            if nread == 0:
-                # EOF
-                self._close(True)  # ???
-                break
-            
-            self.content_read += nread
-            total += nread
-            self.chunk_left -= nread
-            
-            if self.chunk_left == 0:
-                # We finished the chunk: validate trailing LF/CRLF immediately.
+            if not self.isclosed() and self.chunk_left == 0:
+                # Consume trailing LF/CRLF
                 if (cr := self._sock.read(1)) == b"\n" or (cr == b"\r" and self._sock.read(1) == b"\n"):
-                    self.chunk_left = None  # ready for next chunk header
+                    self.chunk_left = None
                 else:
                     # Malformed data: missing LF/CRLF after this chunk
                     self._close(True)
-                    break
         
         if arg_is_memoryview:
-            return total # an integer
+            return total
         elif res_is_memoryview:
             if total == len(res):
-                # optimisation so that the caller doesn't have to do bytes() on the return value
-                return buf # a bytearray
+                return buf          # bytearray
             else:
-                return res[:total] # a memoryview
+                return res[:total]  # memoryview
         else:
-            return res # a list of bytes objects
-    
+            return chunk if chunk is not None else _BLANK
+
     def read_raw(self, arg=None):
         arg_is_memoryview = isinstance(arg, memoryview)
-        
-        if arg is None:
-            pass
-        elif arg_is_memoryview:
+        res_is_memoryview = False
+        if arg_is_memoryview:
             if len(arg) == 0:
                 return 0
-        else:
-            assert isinstance(arg, int)
-            if arg <= 0:
+            res = arg
+        elif arg is not None:
+            arg = int(arg)
+            if arg < 0:
+                arg = None
+            elif arg == 0:
                 return _BLANK
+            else:
+                buf = bytearray(arg)
+                res = memoryview(buf)
+                res_is_memoryview = True
+        total = 0
         
         if self.isclosed():
-            # End of File
             if arg_is_memoryview:
                 return 0
-            return _BLANK
+            elif res_is_memoryview:
+                return res[:0]
+            else:
+                return _BLANK
         
+        # Read the whole body in one go when no size was given
+        # and the length is unknown (read-until-EOF framing).
+        if arg is None and self.content_length is None:
+            chunk = self._sock.read()
+            self.content_read += len(chunk)
+            self.close()
+            return chunk
+        
+        # Compute how much to try to read this call.
         if self.content_length is None:
-            # no Content-Length header
-            if arg is None:
-                res = self._sock.read()
-                if res is None:
-                    return _BLANK
-                self.content_read += len(res)
-                self.close()
-                return res
-            elif arg_is_memoryview:
-                to_read = len(arg)
-            else:
-                to_read = arg
+            # arg is an int or memoryview; no content-length to bound against
+            to_read = len(res) if (arg_is_memoryview or res_is_memoryview) else arg
         else:
+            remaining = self.content_length - self.content_read
             if arg is None:
-                to_read = self.content_length - self.content_read
-            elif arg_is_memoryview:
-                to_read = min(self.content_length - self.content_read, len(arg))
+                to_read = remaining
+            elif arg_is_memoryview or res_is_memoryview:
+                to_read = min(remaining, len(res))
             else:
-                to_read = min(self.content_length - self.content_read, arg)
+                to_read = min(remaining, arg)
         
         if to_read < 0:
-            # Malformed data: read more than Content-Length
+            # Malformed data: already read more than Content-Length
             self._close(True)
             if arg_is_memoryview:
                 return 0
-            return _BLANK
+            elif res_is_memoryview:
+                return res[:0]
+            else:
+                return _BLANK
         
-        if arg_is_memoryview:
-            nread = self._sock.readinto(arg[:to_read])
-            if nread is None or nread < 0:
-                nread = 0
-            elif nread == 0:
-                # End of Content
-                self.close()
+        chunk = None  # for the bytes-return path
+        
+        if to_read > 0:
+            if arg_is_memoryview or res_is_memoryview:
+                nread = self._sock.readinto(res[total:total+to_read])
+                if not nread:
+                    self.close()
+                else:
+                    self.content_read += nread
+                    total += nread
             else:
-                self.content_read += nread
-        else:
-            res = self._sock.read(to_read)
-            nread = None if res is None else len(res)
-            if nread is None:
-                nread = 0
-            elif nread == 0:
-                # End of Content
-                self.close()
-            else:
-                self.content_read += nread
+                chunk = self._sock.read(to_read)
+                if not chunk:
+                    self.close()
+                    chunk = None
+                else:
+                    self.content_read += len(chunk)
+                    total += len(chunk)
         
         if self.content_length is not None:
             if self.content_read == self.content_length:
-                # End of Content
                 self.close()
             elif self.content_read > self.content_length:
                 # Malformed data: read more than Content-Length
                 self._close(True)
         
         if arg_is_memoryview:
-            return nread
-        return res
+            return total
+        elif res_is_memoryview:
+            if total == len(res):
+                return buf
+            else:
+                return res[:total]
+        else:
+            return chunk if chunk is not None else _BLANK
     
     def geturl(self):
         return self._url
@@ -746,39 +748,19 @@ class HTTPResponse:
             raise ValueError("chunk_size must be > 0")
         buf = memoryview(bytearray(chunk_size))
         
-        poller = select.poll()
-        poller.register(self._sock, select.POLLIN)  #TODO: check that this works with SSL-wrapped sockets
-        try:
-            while True:
-                if not poller.poll(-1):
-                    continue
-                n = self.readinto(buf)
-                if n is None:
-                    continue
-                if not n:
-                    break
-                yield bytes(buf[:n])
-        finally:
-            if self._sock is not None:
-                poller.unregister(self._sock)
+        while True:
+            n = self.readinto(buf)
+            if n <= 0:
+                break
+            yield bytes(buf[:n])
     
     # Extension
     def iter_content_into(self, buf):
-        poller = select.poll()
-        poller.register(self._sock, select.POLLIN)  #TODO: check that this works with SSL-wrapped sockets
-        try:
-            while True:
-                if not poller.poll(-1):
-                    continue
-                n = self.readinto(buf)
-                if n is None:
-                    continue
-                if not n:
-                    break
-                yield n
-        finally:
-            if self._sock is not None:
-                poller.unregister(self._sock)
+        while True:
+            n = self.readinto(buf)
+            if n <= 0:
+                break
+            yield n
     
     def readable(self):
         return True
@@ -852,10 +834,12 @@ class HTTPConnection:
             if hasattr(headers, "keys") and callable(headers.keys):
                 keys = headers.keys()
             else:
-                keys = (header[0] for header in headers)  # generator
+                if not isinstance(headers, (list, tuple)):
+                    headers = list(headers)
+                keys = (header[0] for header in headers)
             for key in keys:
                 if not isinstance(headers, HTTPMessage):
-                    key = HTTPMessage.normalize_key(key)  # class method
+                    key = HTTPMessage.normalize_key(key)
                 if key == b"accept-encoding":
                     have_accept_encoding = True
                 elif key == b"content-length":
@@ -948,14 +932,17 @@ class HTTPConnection:
     # Extension
     def putheaders(self, headers, cookies=None):
         if headers is not None:
-            for key, val in headers.items():
+            if hasattr(headers, "items") and callable(headers.items):
+                headers = (x for x in headers.items())  # generator
+            for key, val in headers:
                 self.putheader(key, val)
         
         if cookies is not None:
-            # Trust the cookie names and values from the caller
+            if hasattr(cookies, "items") and callable(cookies.items):
+                cookies = (x for x in cookies.items())  # generator
             values = []
-            for key, val in cookies.items():
-                values.append(b"%s=%s" % (_encode_and_validate(key, _ENCODE_HEAD, force_bytes=True), _encode_and_validate(val, _ENCODE_HEAD, force_bytes=True)))
+            for args in cookies:
+                values.append(b"=".join(_encode_and_validate(arg, _ENCODE_HEAD, force_bytes=True) for arg in args))
             if len(values) == 1:
                 self.putheader(b"Cookie", values[0])
             elif len(values):
@@ -1021,7 +1008,8 @@ class HTTPConnection:
         if self._auto_open and not self._sent_data:
             try:
                 if self.sock is not None:
-                    if self.sock.sendall(data):
+                    self.sock.sendall(data)
+                    if data:
                         self._sent_data = True
                     return
             except OSError:
@@ -1032,13 +1020,15 @@ class HTTPConnection:
                 self.connect()
             except OSError:
                 raise NotConnected()
-            if self.sock.sendall(data):
+            self.sock.sendall(data)
+            if data:
                 self._sent_data = True
             return
         
         if self.sock is None:
             raise NotConnected()
-        if self.sock.sendall(data):
+        self.sock.sendall(data)
+        if data:
             self._sent_data = True
     
     def send_chunk(self, data):
@@ -1164,10 +1154,19 @@ else:
         
         def connect(self):
             super().connect()
-            if self._context is None:
+            raw = self.sock
+            try:
+                if self._context is None:
+                    try:
+                        self.sock = ssl.wrap_socket(raw, server_hostname=self.host)
+                    except TypeError:
+                        self.sock = ssl.wrap_socket(raw)
+                else:
+                    self.sock = self._context.wrap_socket(raw, server_hostname=self.host)
+            except Exception:
+                self.sock = None
                 try:
-                    self.sock = ssl.wrap_socket(self.sock, server_hostname=self.host)
-                except TypeError:
-                    self.sock = ssl.wrap_socket(self.sock)
-            else:
-                self.sock = self._context.wrap_socket(self.sock, server_hostname=self.host)
+                    raw.close()
+                except OSError:
+                    pass
+                raise

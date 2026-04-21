@@ -26,8 +26,7 @@ _CS_REQ_SENT = const(2)
 #                   response is marked incomplete: the body can't be trusted.
 # After close() returns, whether the underlying OS socket was actually closed
 # is derivable from other observable state (will_close, _incomplete, chunk_left,
-# and the content-length/read pair); HTTPConnection.putrequest() inlines that
-# check to tell whether its cached self.sock reference has gone stale.
+# and the content-length/read pair).
 _CR_DONE = const(0)
 _CR_EOF = const(1)
 _CR_MALFORMED = const(2)
@@ -71,29 +70,33 @@ class NormalizedDict(dict):
     
     def __contains__(self, key):
         key = self.normalize_key(key)
-        return super().__contains__(key)
-    
-    def __setitem__(self, key, val):
-        key = self.normalize_key(key)
-        super().__setitem__(key, val)
-    
-    def __getitem__(self, key):
-        key = self.normalize_key(key)
-        val = super().__getitem__(key)
-        return self.normalize_val(val)
+        return key in super().keys()
     
     def __delitem__(self, key):
         key = self.normalize_key(key)
         super().__delitem__(key)
 
-    def set(self, key, val):
+    def __getitem__(self, key):
+        key = self.normalize_key(key)
+        val = super().__getitem__(key)
+        return self.normalize_val(val)
+    
+    def __setitem__(self, key, val):
         key = self.normalize_key(key)
         super().__setitem__(key, val)
-        return key
     
-    def set_raw(self, key, val):
-        super().__setitem__(key, val)
-        return key
+#    def clear(self):
+#        super().clear()
+    
+    def copy(self):
+        raise NotImplementedError()
+    
+    def get(self, key, default=None):
+        key = self.normalize_key(key)
+        val = self.get_raw(key, _MISSING)
+        if val is _MISSING:
+            return default
+        return self.normalize_val(val)
     
     def get_raw(self, key, default=None):
         return super().get(key, default)
@@ -108,35 +111,39 @@ class NormalizedDict(dict):
             return val.encode(_ENCODE_HEAD)
         return bytes(val)
     
-    def get(self, key, default=None):
-        key = self.normalize_key(key)
-        val = self.get_raw(key, _MISSING)
-        if val is _MISSING:
-            return default
-        return self.normalize_val(val)
+    def items(self):
+        return [(key, self.normalize_val(val)) for key, val in super().items()]
     
-    def pop_raw(self, key, default=_MISSING):
-        val = super().pop(key, _MISSING)
-        if val is _MISSING:
-            if default is _MISSING:
-                raise KeyError(key)
-            return default
-        return val
+#    def keys(self):
+#        return super().keys()
     
     def pop(self, key, default=_MISSING):
+        raise NotImplementedError()
+    
+    def popitem(self):
+        raise NotImplementedError()
+    
+    def set(self, key, val):
         key = self.normalize_key(key)
-        val = super().pop(key, _MISSING)
-        if val is _MISSING:
-            if default is _MISSING:
-                raise KeyError(key)
-            return default
-        return self.normalize_val(val)
+        super().__setitem__(key, val)
+        return key
+    
+    def set_raw(self, key, val):
+        super().__setitem__(key, val)
+        return key
+    
+    def setdefault(self, key, default=_MISSING):
+        raise NotImplementedError()
+    
+    def update(self, iterable):
+        raise NotImplementedError()
     
     def values(self):
         return [self.normalize_val(val) for val in super().values()]
     
-    def items(self):
-        return [(key, self.normalize_val(val)) for key, val in super().items()]
+    @classmethod
+    def fromkeys(self):
+        raise NotImplementedError()
 
 class HTTPMessage(NormalizedDict):
     _lower_key = 1  # Header names are case-insensitive
@@ -237,7 +244,7 @@ class CannotSendRequest(ImproperConnectionState): pass
 class CannotSendHeader(ImproperConnectionState): pass
 class ResponseNotReady(ImproperConnectionState): pass
 class BadStatusLine(HTTPException): pass
-class RemoteDisconnected(BadStatusLine): pass
+class RemoteDisconnected(ConnectionResetError, BadStatusLine): pass
 
 def _iterable(x):
     try:
@@ -305,8 +312,8 @@ def parse_host_port(host, port, default_port=None):
             if port_str == "":
                 port = default_port
             elif not port_str[0].isdigit():
-	            raise ValueError("invalid port")
-	        else:
+                raise ValueError("invalid port")
+            else:
                 port = int(port_str, 10)
             host = host[:i]
         else:
@@ -571,23 +578,21 @@ class HTTPResponse:
     
     def _read_chunked(self, arg=None):
         # NOTE: _read_raw assumes a blocking socket.
-
+        
         arg_is_memoryview = isinstance(arg, memoryview)
-        res_is_memoryview = False
         if arg_is_memoryview:
             if len(arg) == 0:
                 return 0
             res = arg
-        elif arg is not None:
-            arg = int(arg)
-            if arg < 0:
-                arg = None
-            elif arg == 0:
-                return None
-        
-        total = 0
-        if not (arg_is_memoryview or res_is_memoryview):
+        else:
             parts = []
+            if arg is not None:
+                arg = int(arg)
+                if arg < 0:
+                    arg = None
+                elif arg == 0:
+                    return None
+        total = 0
         
         while True:
             if self.isclosed():
@@ -596,8 +601,6 @@ class HTTPResponse:
             # Read a new chunk header if we don't have an open chunk already.
             if self.chunk_left is None:
                 line = self._sock.readline()
-                # Strip chunk extensions ("size;ext1=val1" -> "size"). Skip the
-                # split() in the common case (no extensions).
                 sep = line.find(b';')
                 if sep >= 0:
                     line = line[:sep]
@@ -626,7 +629,7 @@ class HTTPResponse:
                     break
             
             # We have self.chunk_left > 0 here (== 0 was handled above).
-            if arg_is_memoryview or res_is_memoryview:
+            if arg_is_memoryview:
                 space = len(res) - total
                 if space <= 0:
                     break  # output buffer full; leave chunk_left for next call
@@ -688,7 +691,7 @@ class HTTPResponse:
                 self.chunk_left = None
             
             # Stop when caller-supplied buffer or byte-count is satisfied.
-            if arg_is_memoryview or res_is_memoryview:
+            if arg_is_memoryview:
                 if total >= len(res):
                     break
             elif arg is not None:
@@ -698,8 +701,6 @@ class HTTPResponse:
         
         if arg_is_memoryview:
             return total
-        elif res_is_memoryview:
-            return res[:total]
         else:
             return parts
     
@@ -747,7 +748,10 @@ class HTTPResponse:
         # Compute how much to try to read this call.
         if self.content_length is None:
             # arg is an int or memoryview; no content-length to bound against
-            to_read = len(res) if (arg_is_memoryview or res_is_memoryview) else arg
+            if arg_is_memoryview or res_is_memoryview:
+                to_read = len(res)
+            else:
+                to_read = arg
         else:
             remaining = self.content_length - self.content_read
             if arg is None:
@@ -1057,15 +1061,15 @@ class HTTPConnection:
             for args in cookies:
                 values.append(b"=".join(_encode_and_validate(arg, _ENCODE_HEAD, force_bytes=True) for arg in args))
             if len(values) == 1:
-                self.putheader(b"Cookie", values[0])
-            elif len(values):
-                self.putheader(b"Cookie", b"; ".join(values))
+                self._putheaderparts(False, b"Cookie: ", values[0], _CRLF)
+            elif len(values) == 0:
+                self._putheaderparts(False, b"Cookie: ", _CRLF)
+            else:
+                for i in range(len(values)):
+                    self._putheaderparts(False, b"Cookie: " if (i == 0) else b"; ", values[i])
+                self._putheaderparts(False, _CRLF)
     
     def putheader(self, header, *values):
-        if self.__state != _CS_REQ_STARTED or self.__response is not None:
-            raise CannotSendHeader()
-        
-        # Trust the header names from the caller, but check the header values
         if isinstance(header, str):
             header = header.encode(_ENCODE_HEAD)
         if len(values) == 1:
@@ -1074,6 +1078,9 @@ class HTTPConnection:
             self._putheaderparts(False, header, b": ", b", ".join(_encode_and_validate(v, _ENCODE_HEAD) for v in values), _CRLF)
     
     def _putheaderparts(self, last, *parts):
+        if self.__state != _CS_REQ_STARTED or self.__response is not None:
+            raise CannotSendHeader()
+        
         if self._buffer is None:
             if len(parts) == 1:
                 self.send_raw(parts[0])
@@ -1258,18 +1265,20 @@ else:
                 if hasattr(ssl, "SSLContext"):
                     context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
                     context.verify_mode = ssl.CERT_NONE
-                else:
-                    context = None
             self._context = context
         
         def connect(self):
             super().connect()
             raw = self.sock
+            if isinstance(self.host, str) and ((':' in self.host) or not all('0' <= (c := self.host[i]) <= '9' or c == '.' for i in range(len(self.host)))):
+                hostname = self.host
+            else:
+                hostname = None
             try:
                 if self._context is None:
-                    self.sock = ssl.wrap_socket(raw, server_hostname=self.host)
+                    self.sock = ssl.wrap_socket(raw, server_hostname=hostname)
                 else:
-                    self.sock = self._context.wrap_socket(raw, server_hostname=self.host)
+                    self.sock = self._context.wrap_socket(raw, server_hostname=hostname)
             except Exception:
                 self.sock = None
                 try:

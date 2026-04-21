@@ -105,11 +105,11 @@ class NormalizedDict(dict):
         val = self.get_raw(key, _MISSING)
         if val is _MISSING:
             return default
-        if isinstance(val, bytes):
-            return val
         if isinstance(val, str):
             return val.encode(_ENCODE_HEAD)
-        return bytes(val)
+        if isinstance(val, (bytearray, memoryview)):
+            return bytes(val)
+        return val
     
     def items(self):
         return [(key, self.normalize_val(val)) for key, val in super().items()]
@@ -254,18 +254,22 @@ def _iterable(x):
         return False
 
 @micropython.viper
-def _validate_ascii(buf:ptr8, buflen:int, allow_space:int) -> int:
+def _validate_ascii(buf:ptr8, buflen:int, deny_flags:int) -> int:
+    deny_space = deny_flags & 1
+    deny_semicolon = deny_flags & 2
     i = 0
     while i < buflen:
         b = buf[i]
         if b < 32 or b >= 127:
             return 0
-        if b == 32 and allow_space == 0:
+        if b == 32 and deny_space:
+            return 0
+        if b == 34 and deny_semicolon:
             return 0
         i += 1
     return 1
 
-def _encode_and_validate(b, charset, *, allow_space=1, force_bytes=False):
+def _encode_and_validate(b, charset, *, allow_space=True, force_bytes=False):
     if isinstance(b, (bytes, bytearray, memoryview)):
         pass
     elif isinstance(b, str):
@@ -274,10 +278,28 @@ def _encode_and_validate(b, charset, *, allow_space=1, force_bytes=False):
         return str(b).encode(charset)
     else:
         raise TypeError("must be bytes-like or int")
-    if _validate_ascii(b, len(b), allow_space) == 0:
+    if _validate_ascii(b, len(b), 0 if allow_space else 1) == 0:
         raise ValueError("can't contain special characters")
     if not force_bytes or isinstance(b, bytes):
         return b
+    return bytes(b)
+
+def _encode_and_validate_cookie_value(b, charset):
+    if isinstance(b, (bytes, bytearray, memoryview)):
+        pass
+    elif isinstance(b, str):
+        b = b.encode(charset)
+    elif isinstance(b, int):
+        return str(b).encode(charset)
+    else:
+        raise TypeError("must be bytes-like or int")
+    if _validate_ascii(b, len(b), 2) == 0:
+        raise ValueError("can't contain special characters")
+    if not force_bytes or isinstance(b, bytes):
+        if b';' in b:
+            return b'"' + b + b'"'
+        else:
+            return b
     return bytes(b)
 
 def _create_connection(address, timeout):
@@ -294,9 +316,11 @@ def _create_connection(address, timeout):
                 pass
             sock.connect(a)
             return sock
-        except OSError:
+        except Exception as e:
             if sock is not None:
                 sock.close()
+            if not isinstance(e, OSError):
+                raise e
     raise OSError(128)  # ENOTCONN
 
 def create_connection(address, timeout=None):
@@ -371,6 +395,29 @@ def parse_headers(sock, *, extra_headers=True, parse_cookies=None):  # returns d
             last_header = key
         else:
             last_header = None
+
+def multipart_encode(fields, boundary=None):
+    if boundary is None:
+        boundary = b"BOUNDARY--" + b"%x" % id(fields) + b"--" + b"%x" % time.ticks_us()
+    
+    def generator():
+        for name, value in fields.items():
+            yield b"--" + boundary + b"\r\n"
+            # If value is a dict/tuple, treat as a file
+            if isinstance(value, (list, tuple)):
+                filename, content_type, data = value
+                yield b'Content-Disposition: form-data; name="' + name.encode() + \
+                      b'"; filename="' + filename.encode() + b'"\r\n'
+                yield b'Content-Type: ' + content_type.encode() + b'\r\n\r\n'
+                # data can be a file-like object or bytes
+                yield data
+            else:
+                yield b'Content-Disposition: form-data; name="' + name.encode() + b'"\r\n\r\n'
+                yield str(value).encode()
+            yield b"\r\n"
+        yield b"--" + boundary + b"--\r\n"
+    
+    return boundary, generator()
 
 class HTTPResponse:
     def __enter__(self):
@@ -577,7 +624,7 @@ class HTTPResponse:
             return self._read_raw(amt)
     
     def _read_chunked(self, arg=None):
-        # NOTE: _read_raw assumes a blocking socket.
+        # NOTE: requires a blocking socket
         
         arg_is_memoryview = isinstance(arg, memoryview)
         if arg_is_memoryview:
@@ -705,7 +752,7 @@ class HTTPResponse:
             return parts
     
     def _read_raw(self, arg=None):
-        # NOTE: _read_raw assumes a blocking socket.
+        # NOTE: requires a blocking socket
         
         arg_is_memoryview = isinstance(arg, memoryview)
         res_is_memoryview = False
@@ -1059,7 +1106,7 @@ class HTTPConnection:
                 cookies = cookies.items()
             values = []
             for args in cookies:
-                values.append(b"=".join(_encode_and_validate(arg, _ENCODE_HEAD, force_bytes=True) for arg in args))
+                values.append(b"=".join(_encode_and_validate_cookie_value(arg, _ENCODE_HEAD, force_bytes=True) for arg in args))
             if len(values) == 1:
                 self._putheaderparts(False, b"Cookie: ", values[0], _CRLF)
             elif len(values) == 0:
@@ -1082,31 +1129,26 @@ class HTTPConnection:
             raise CannotSendHeader()
         
         if self._buffer is None:
-            if len(parts) == 1:
-                self.send_raw(parts[0])
-            else:
-                self.send_raw(_BLANK.join(parts))
+            self.send_raw(_BLANK.join(parts))
         else:
             for part in parts:
                 len_part = len(part)
-                if self._filled + len_part <= self._buffer_size:
+                if len_part >= self._buffer_size:
+                    if self._filled:
+                        self.send_raw(self._buffer[:self._filled])
+                        self._filled = 0
+                    self.send_raw(part)
+                elif self._filled + len_part <= self._buffer_size:
                     self._buffer[self._filled:self._filled+len_part] = part
                     self._filled += len_part
                 else:
                     self.send_raw(self._buffer[:self._filled])
-                    self._filled = 0
-                    if len_part >= self._buffer_size:
-                        self.send_raw(part)
-                    else:
-                        self._buffer[:len_part] = part
-                        self._filled = len_part
+                    self._buffer[:len_part] = part
+                    self._filled = len_part
         
-        if last:
-            if self._buffer is not None:
-                was_filled = self._filled
-                self._filled = 0
-                if was_filled:
-                    self.send_raw(self._buffer[:was_filled])
+        if last and self._filled:
+            self.send_raw(self._buffer[:self._filled])
+            self._filled = 0
     
     def endheaders(self, message_body=None, *, encode_chunked=False):
         if self.__state != _CS_REQ_STARTED or self.__response is not None:
@@ -1119,6 +1161,8 @@ class HTTPConnection:
             self.send(message_body, encode_chunked=encode_chunked)
     
     def send_raw(self, data):
+        # NOTE: requires a blocking socket
+        
         if data is None:
             data = _BLANK
         
@@ -1156,25 +1200,26 @@ class HTTPConnection:
         self.send_raw(data)
         self.send_raw(_CRLF)
     
-    def send(self, data, *, encode_chunked=False, final_chunk=True):  # encode_chunked and final_chunk are extensions
-        if isinstance(data, str):
-            data = data.encode(_ENCODE_BODY)
+    def send(self, data, *, encode_chunked=False, final_chunk=True, _descend=True, _buf=None):  # encode_chunked and final_chunk are extensions
         
         send = self.send_chunk if encode_chunked else self.send_raw
+        
+        if isinstance(data, str):
+            data = data.encode(_ENCODE_BODY)
         
         if data is None:
             if self.debuglevel > 0:
                 print("send: None")
-            pass
+        
         elif isinstance(data, (bytes, bytearray, memoryview)):
             if self.debuglevel > 0:
                 print("send:", type(data).__name__, len(data))
             if data:
                 send(data)
+        
         elif hasattr(data, "readinto"):
-            buf = memoryview(bytearray(self.blocksize))
             while True:
-                n = data.readinto(buf)
+                n = data.readinto(_buf)
                 if self.debuglevel > 0:
                     print("send:", type(data).__name__, None if n is None else n)
                 if n is None or n < 0:
@@ -1182,7 +1227,8 @@ class HTTPConnection:
                     continue
                 if not n:
                     break
-                send(buf[:n])
+                send(_buf[:n])
+        
         elif hasattr(data, "read"):
             while True:
                 d = data.read(self.blocksize)
@@ -1196,22 +1242,13 @@ class HTTPConnection:
                 if not d:
                     break
                 send(d)
-        elif _iterable(data):  # includes generators (bytes-like was handled earlier)
+        
+        elif _descend:
             for d in data:
-                if isinstance(d, str):
-                    d = d.encode(_ENCODE_BODY)
-                if d is None:
-                    if self.debuglevel > 0:
-                        print("send: None")
-                    continue
-                if isinstance(d, (bytes, bytearray, memoryview)):
-                    if self.debuglevel > 0:
-                        print("send:", type(d).__name__, len(d))
-                    if not d:
-                        continue
-                else:
-                    raise TypeError("unexpected data")
-                send(d)
+                if _buf is None and hasattr(d, "readinto"):
+                    _buf = memoryview(bytearray(self.blocksize))
+                self.send(d, encode_chunked=encode_chunked, final_chunk=False, _descend=False, _buf=_buf)
+        
         else:
             raise TypeError("unexpected data")
         
@@ -1270,10 +1307,17 @@ else:
         def connect(self):
             super().connect()
             raw = self.sock
-            if isinstance(self.host, str) and ((':' in self.host) or not all('0' <= (c := self.host[i]) <= '9' or c == '.' for i in range(len(self.host)))):
-                hostname = self.host
+
+            hostname = None
+            if not isinstance(self.host, str):
+                pass
+            elif all(c.isdigit() or c == '.' for c in self.host):
+                pass
+            elif ':' in self.host:
+                pass
             else:
-                hostname = None
+                hostname = self.host
+            
             try:
                 if self._context is None:
                     self.sock = ssl.wrap_socket(raw, server_hostname=hostname)

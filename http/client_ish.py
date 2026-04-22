@@ -58,6 +58,34 @@ _CRLF = const(b"\r\n")
 
 _MISSING = object()  # sentinel
 
+@micropython.viper
+def _lower_helper(buf:ptr8, buflen:int, inplace:bool) -> int:
+    retval = 0
+    i = 0
+    while i < buflen:
+        b = buf[i]
+        if 65 <= b <= 90:
+            if inplace:
+                buf[i] = b + 32
+            else:
+                retval = 1
+                break
+        i += 1
+    return retval
+
+def _lower(s):
+    if isinstance(s, (str, bytes)):
+        if _lower_helper(s, len(s), 0):
+            s = s.lower()
+    elif isinstance(s, bytearray):
+        _lower_helper(s, len(s), 1)
+    elif isinstance(s, memoryview):
+        if _lower_helper(s, len(s), 0):
+            s = bytes(s).lower()
+    else:
+        s = s.lower()
+    return s
+
 class NormalizedDict(dict):
     
     @classmethod
@@ -70,7 +98,7 @@ class NormalizedDict(dict):
     
     def __contains__(self, key):
         key = self.normalize_key(key)
-        return key in super().keys()
+        return super().__contains__(key)
     
     def __delitem__(self, key):
         key = self.normalize_key(key)
@@ -91,28 +119,36 @@ class NormalizedDict(dict):
     def copy(self):
         raise NotImplementedError()
     
-    def get(self, key, default=None):
-        key = self.normalize_key(key)
-        val = self.get_raw(key, _MISSING)
-        if val is _MISSING:
-            return default
-        return self.normalize_val(val)
-    
     def get_raw(self, key, default=None):
         return super().get(key, default)
     
-    def get_raw_bytes(self, key, default=None):
-        val = self.get_raw(key, _MISSING)
+    def get(self, key, default=None, as_type=None):
+        key = self.normalize_key(key)
+        val = super().get(key, _MISSING)
         if val is _MISSING:
             return default
+        if as_type is None:
+            return self.normalize_val(val)
+        if val is None:
+            return as_type()
         if isinstance(val, str):
-            return val.encode(_ENCODE_HEAD)
-        if isinstance(val, (bytearray, memoryview)):
-            return bytes(val)
-        return val
+            if as_type is str:
+                return val
+            if as_type is bytes:
+                return val.encode()
+            return as_type(val)
+        if isinstance(val, memoryview):
+            val = bytes(val)
+        if isinstance(val, (bytes, bytearray)):
+            if as_type is str:
+                return val.decode()
+            if as_type is bytes:
+                return val
+        return as_type(val)
     
     def items(self):
-        return [(key, self.normalize_val(val)) for key, val in super().items()]
+        for key, val in super().items():
+            yield key, self.normalize_val(val)
     
 #    def keys(self):
 #        return super().keys()
@@ -126,11 +162,9 @@ class NormalizedDict(dict):
     def set(self, key, val):
         key = self.normalize_key(key)
         super().__setitem__(key, val)
-        return key
     
     def set_raw(self, key, val):
         super().__setitem__(key, val)
-        return key
     
     def setdefault(self, key, default=_MISSING):
         raise NotImplementedError()
@@ -139,7 +173,8 @@ class NormalizedDict(dict):
         raise NotImplementedError()
     
     def values(self):
-        return [self.normalize_val(val) for val in super().values()]
+        for val in super().values():
+            yield self.normalize_val(val)
     
     @classmethod
     def fromkeys(self):
@@ -159,7 +194,7 @@ class HTTPMessage(NormalizedDict):
                 if key[0] <= 32 or key[-1] <= 32:
                     key = key.strip()
             if key and cls._lower_key:
-                key = key.lower()
+                key = _lower(key)
         return key
     
     @classmethod
@@ -202,29 +237,25 @@ class HTTPCookies(HTTPMessage):  # Extension
     
     def attributes(self, key):
         key = self.normalize_key(key)
-        val = self.get_raw_bytes(key, _MISSING)
+        val = self.get(key, _MISSING, str)
         if val is _MISSING:
             raise KeyError(key)
-        attrs = {}
-
-        if isinstance(val, memoryview):
-            val = bytes(val)
-        if isinstance(val, (bytes, bytearray)):
-            val = val.decode(_DECODE_HEAD)
-        if not isinstance(val, str) or val == "":
-            return attrs
+        if val == "":
+            return {}
         
         if val[0].isspace() or val[-1].isspace():
             val = val.strip()
         if val.startswith('"'):
             sep = val.find('"', 1)
             if sep != -1:
-                val = val[sep+1:]
+                sep = val.find(";", sep+1)
         else:
             sep = val.find(";")
-            if sep != -1:
-                val = val[sep:]
+        if sep == -1:
+            return {}
+        val = val[sep:]
         
+        attrs = {}
         for attr in val.split(";"):
             sep = attr.find("=")
             if sep != -1:
@@ -246,17 +277,13 @@ class ResponseNotReady(ImproperConnectionState): pass
 class BadStatusLine(HTTPException): pass
 class RemoteDisconnected(ConnectionResetError, BadStatusLine): pass
 
-def _iterable(x):
-    try:
-        iter(x)
-        return True
-    except TypeError:
-        return False
-
 @micropython.viper
 def _validate_ascii(buf:ptr8, buflen:int, deny_flags:int) -> int:
-    deny_space = deny_flags & 1
-    deny_semicolon = deny_flags & 2
+    deny_space = (deny_flags & 1)
+    deny_comma = (deny_flags & 2)
+    deny_equal = (deny_flags & 4)
+    deny_semicolon = (deny_flags & 8)
+    deny_quote = (deny_flags & 16)
     i = 0
     while i < buflen:
         b = buf[i]
@@ -264,43 +291,35 @@ def _validate_ascii(buf:ptr8, buflen:int, deny_flags:int) -> int:
             return 0
         if b == 32 and deny_space:
             return 0
-        if b == 34 and deny_semicolon:
+        if b == 44 and deny_comma:
+            return 0
+        if b == 61 and deny_equal:
+            return 0
+        if b == 59 and deny_semicolon:
+            return 0
+        if b == 34 and deny_quote:
             return 0
         i += 1
     return 1
 
-def _encode_and_validate(b, charset, *, allow_space=True, force_bytes=False):
+def _encode_and_validate(b, charset, *, deny_flags=0, force_bytes=False, and_quote=False):
+    valid = False
     if isinstance(b, (bytes, bytearray, memoryview)):
         pass
     elif isinstance(b, str):
         b = b.encode(charset)
     elif isinstance(b, int):
-        return str(b).encode(charset)
+        b = str(b).encode(charset)
+        valid = True
     else:
         raise TypeError("must be bytes-like or int")
-    if _validate_ascii(b, len(b), 0 if allow_space else 1) == 0:
+    if (not valid) and _validate_ascii(b, len(b), deny_flags) == 0:
         raise ValueError("can't contain special characters")
-    if not force_bytes or isinstance(b, bytes):
-        return b
-    return bytes(b)
-
-def _encode_and_validate_cookie_value(b, charset):
-    if isinstance(b, (bytes, bytearray, memoryview)):
-        pass
-    elif isinstance(b, str):
-        b = b.encode(charset)
-    elif isinstance(b, int):
-        return str(b).encode(charset)
-    else:
-        raise TypeError("must be bytes-like or int")
-    if _validate_ascii(b, len(b), 2) == 0:
-        raise ValueError("can't contain special characters")
-    if not force_bytes or isinstance(b, bytes):
-        if b';' in b:
-            return b'"' + b + b'"'
-        else:
-            return b
-    return bytes(b)
+    if (force_bytes or and_quote) and isinstance(b, memoryview):
+        b = bytes(b)
+    if and_quote:
+        b = b'"' + b + b'"'
+    return b
 
 def _create_connection(address, timeout):
     host, port = address
@@ -318,7 +337,10 @@ def _create_connection(address, timeout):
             return sock
         except Exception as e:
             if sock is not None:
-                sock.close()
+                try:
+                    sock.close()
+                except OSError:
+                    pass
             if not isinstance(e, OSError):
                 raise e
     raise OSError(128)  # ENOTCONN
@@ -367,7 +389,7 @@ def parse_headers(sock, *, extra_headers=True, parse_cookies=None):  # returns d
         
         if line.startswith((b' ', b'\t')):
             if last_header is not None:
-                old_val = headers.get_raw_bytes(last_header, _MISSING)
+                old_val = headers.get_raw(last_header, _MISSING)
                 if old_val is not _MISSING:
                     headers.set_raw(last_header, old_val + b" " + line.strip())
             continue
@@ -387,7 +409,7 @@ def parse_headers(sock, *, extra_headers=True, parse_cookies=None):  # returns d
                     cookies.set(key, val)  # includes any quotes and parameters
             last_header = None
         elif extra_headers is True or (extra_headers and key in extra_headers) or key in _IMPORTANT_HEADERS:
-            old_val = headers.get_raw_bytes(key, _MISSING)
+            old_val = headers.get_raw(key, _MISSING)
             if old_val is not _MISSING:
                 headers.set_raw(key, old_val + b", " + val)
             else:
@@ -395,29 +417,6 @@ def parse_headers(sock, *, extra_headers=True, parse_cookies=None):  # returns d
             last_header = key
         else:
             last_header = None
-
-def multipart_encode(fields, boundary=None):
-    if boundary is None:
-        boundary = b"BOUNDARY--" + b"%x" % id(fields) + b"--" + b"%x" % time.ticks_us()
-    
-    def generator():
-        for name, value in fields.items():
-            yield b"--" + boundary + b"\r\n"
-            # If value is a dict/tuple, treat as a file
-            if isinstance(value, (list, tuple)):
-                filename, content_type, data = value
-                yield b'Content-Disposition: form-data; name="' + name.encode() + \
-                      b'"; filename="' + filename.encode() + b'"\r\n'
-                yield b'Content-Type: ' + content_type.encode() + b'\r\n\r\n'
-                # data can be a file-like object or bytes
-                yield data
-            else:
-                yield b'Content-Disposition: form-data; name="' + name.encode() + b'"\r\n\r\n'
-                yield str(value).encode()
-            yield b"\r\n"
-        yield b"--" + boundary + b"--\r\n"
-    
-    return boundary, generator()
 
 class HTTPResponse:
     def __enter__(self):
@@ -459,24 +458,23 @@ class HTTPResponse:
                 print("cookie:", repr(key), "=", repr(val))
         
         # are we using the chunked-style of transfer encoding?
-        self.chunked = (b"chunked" in self.headers.get_raw_bytes(b"transfer-encoding", b"").lower())
+        self.chunked = (b"chunked" in _lower(self.headers.get(b"transfer-encoding", b"", bytes)))
         self.chunk_left = None
         
         # will the connection close at the end of the response?
-        conn = self.headers.get_raw_bytes(b"connection")
-        conn = conn.lower() if conn else b""
+        conn = _lower(self.headers.get(b"connection", b"", bytes))
         if self.version == 10:
             if b"keep-alive" in conn:
                 self.will_close = False
             else:
-                self.will_close = (self.headers.get_raw_bytes(b"keep-alive") is None)
+                self.will_close = (self.headers.get(b"keep-alive", _MISSING, bytes) is _MISSING)
         else:
             self.will_close = b"close" in conn
         
         # do we have a Content-Length?
         # NOTE: RFC 2616, S4.4, #3 says we ignore this if chunked
         self.content_length = None
-        length = self.headers.get_raw_bytes(b"content-length")
+        length = self.headers.get(b"content-length", None)
         if length and not self.chunked:
             try:
                 self.content_length = int(length, 10)
@@ -1052,8 +1050,10 @@ class HTTPConnection:
         else:
             encode_chunked = False
         
-        self.putheaders(headers, cookies)
-        
+        if headers is not None:
+            self.putheaders(headers)
+        if cookies is not None:
+            self.putcookies(cookies)
         self.endheaders(body, encode_chunked=encode_chunked)
     
     # derived from CPython (all bugs are mine)
@@ -1071,13 +1071,13 @@ class HTTPConnection:
         self._filled = 0
         
         # Trust the method name from the caller
-        method = _encode_and_validate(method, "ascii", allow_space=0, force_bytes=True)
+        method = _encode_and_validate(method, "ascii", deny_flags=1, force_bytes=True)
         if method == b"GET":
             self._method = "GET"
         else:
             self._method = method.upper().decode("ascii")
         self._url = url
-        url = _encode_and_validate(url, _ENCODE_HEAD, allow_space=0) if url else b"/"
+        url = _encode_and_validate(url, _ENCODE_HEAD, deny_flags=1) if url else b"/"
         
         self._putheaderparts(False, method, b" ", url, b" HTTP/1.1\r\n")
         
@@ -1094,27 +1094,27 @@ class HTTPConnection:
             self._putheaderparts(False, b"Accept-Encoding: identity\r\n")
     
     # Extension
-    def putheaders(self, headers, cookies=None):
-        if headers is not None:
-            if hasattr(headers, "items") and callable(headers.items):
-                headers = headers.items()
-            for key, val in headers:
-                self.putheader(key, val)
-        
-        if cookies is not None:
-            if hasattr(cookies, "items") and callable(cookies.items):
-                cookies = cookies.items()
-            values = []
-            for args in cookies:
-                values.append(b"=".join(_encode_and_validate_cookie_value(arg, _ENCODE_HEAD, force_bytes=True) for arg in args))
-            if len(values) == 1:
-                self._putheaderparts(False, b"Cookie: ", values[0], _CRLF)
-            elif len(values) == 0:
-                self._putheaderparts(False, b"Cookie: ", _CRLF)
-            else:
-                for i in range(len(values)):
-                    self._putheaderparts(False, b"Cookie: " if (i == 0) else b"; ", values[i])
-                self._putheaderparts(False, _CRLF)
+    def putheaders(self, headers):
+        if hasattr(headers, "items") and callable(headers.items):
+            headers = headers.items()
+        for key, val in headers:
+            self.putheader(key, val)
+    
+    # Extension
+    def putcookies(self, cookies):
+        if hasattr(cookies, "items") and callable(cookies.items):
+            cookies = cookies.items()
+        values = []
+        for params in cookies:
+            values.append(b"=".join(_encode_and_validate(params[i], _ENCODE_HEAD, deny_flags=(29 if i == 0 else 25), force_bytes=True, and_quote=(i > 0)) for i in range(len(params))))
+        if len(values) == 1:
+            self._putheaderparts(False, b"Cookie: ", values[0], _CRLF)
+        elif len(values) == 0:
+            self._putheaderparts(False, b"Cookie: ", _CRLF)
+        else:
+            for i in range(len(values)):
+                self._putheaderparts(False, b"Cookie: " if (i == 0) else b"; ", values[i])
+            self._putheaderparts(False, _CRLF)
     
     def putheader(self, header, *values):
         if isinstance(header, str):
@@ -1122,7 +1122,7 @@ class HTTPConnection:
         if len(values) == 1:
             self._putheaderparts(False, header, b": ", _encode_and_validate(values[0], _ENCODE_HEAD), _CRLF)
         else:
-            self._putheaderparts(False, header, b": ", b", ".join(_encode_and_validate(v, _ENCODE_HEAD) for v in values), _CRLF)
+            self._putheaderparts(False, header, b": ", b", ".join(_encode_and_validate(v, _ENCODE_HEAD, deny_flags=2) for v in values), _CRLF)
     
     def _putheaderparts(self, last, *parts):
         if self.__state != _CS_REQ_STARTED or self.__response is not None:

@@ -1,5 +1,3 @@
-# http/client_ish.py
-
 import micropython, socket, time
 
 HTTP_PORT = const(80)
@@ -358,6 +356,9 @@ class HTTPResponse:
             return self._readinto(memoryview(buf))
     
     def _readinto(self, bmv):
+        # Zero-sized: return immediately without touching the socket.
+        if len(bmv) == 0:
+            return 0
         if self.chunked:
             return self._read_chunked(bmv)
         else:
@@ -376,16 +377,17 @@ class HTTPResponse:
         return _BLANK.join(res)
     
     def _read(self, amt=None):
+        # Zero-sized: return immediately without touching the socket.
+        if amt == 0:
+            return None
         if self.chunked:
             return self._read_chunked(amt)
         else:
             return self._read_raw(amt)
     
     def _read_chunked(self, arg=None):
-        # Blocking socket assumed.
+        # Blocking socket assumed. Zero-sized arg is filtered upstream.
         # Input: memoryview (fills it; returns int), None/int (returns list[bytes]).
-        # Zero-sized requests touch the socket only when mid-chunk; between
-        # chunks the only available op is readline() which can't be zero-bytes.
         arg_is_memoryview = isinstance(arg, memoryview)
         if arg_is_memoryview:
             res = arg
@@ -402,14 +404,6 @@ class HTTPResponse:
                 break
             
             if self.chunk_left is None:
-                # Budget exhausted between chunks: don't consume a chunk
-                # header we can't roll back.
-                if arg_is_memoryview:
-                    if len(res) == 0:
-                        break
-                elif arg is not None and arg <= 0:
-                    break
-                
                 line = self._sock.readline()
                 if not line:
                     self.close(_CR_EOF)
@@ -439,7 +433,7 @@ class HTTPResponse:
                             break
                     break
             
-            # self.chunk_left > 0 here.
+            # self.chunk_left > 0 here, and caller's budget is > 0.
             if arg_is_memoryview:
                 space = len(res) - total
                 to_read = self.chunk_left
@@ -451,8 +445,7 @@ class HTTPResponse:
                     nread = self._sock.readinto(res, to_read)
                 else:
                     nread = self._sock.readinto(res[total:total+to_read])
-                # A 0-byte request legitimately returns 0 -- not EOF.
-                if to_read > 0 and not nread:
+                if not nread:
                     self.close(_CR_EOF)
                     break
                 self.content_read += nread
@@ -467,15 +460,13 @@ class HTTPResponse:
                     if to_read > remaining_req:
                         to_read = remaining_req
                 chunk = self._sock.read(to_read)
-                if to_read > 0 and not chunk:
+                if not chunk:
                     self.close(_CR_EOF)
                     break
-                nread = len(chunk)
-                self.content_read += nread
-                total += nread
-                self.chunk_left -= nread
-                if nread:
-                    parts.append(chunk)
+                self.content_read += len(chunk)
+                total += len(chunk)
+                self.chunk_left -= len(chunk)
+                parts.append(chunk)
             
             # Consume the CRLF after the chunk data when the chunk is done.
             if self.chunk_left == 0:
@@ -503,11 +494,11 @@ class HTTPResponse:
             return parts
     
     def _read_raw(self, arg=None):
-        # Blocking socket assumed.
+        # Blocking socket assumed. Zero-sized arg is filtered upstream.
         # Input modes:
         #   memoryview -> fill it, return int
         #   None       -> read all (bounded by CL if set), return bytes
-        #   int >= 0   -> read up to that many (bounded by CL), return bytes
+        #   int > 0    -> read up to that many (bounded by CL), return bytes
         #   int < 0    -> treated as None
         arg_is_memoryview = isinstance(arg, memoryview)
         if arg_is_memoryview:
@@ -556,21 +547,24 @@ class HTTPResponse:
         total = 0
         got_eof = False
         
-        # Always touch the socket. A 0-byte request returning 0 is not EOF.
-        if arg_is_memoryview:
-            nread = self._sock.readinto(res, to_read)
-            if to_read > 0 and not nread:
-                got_eof = True
-            elif nread:
-                self.content_read += nread
-                total = nread
-        else:
-            chunk = self._sock.read(to_read)
-            if to_read > 0 and not chunk:
-                got_eof = True
-                chunk = None
-            elif chunk:
-                self.content_read += len(chunk)
+        # to_read can be 0 when CL is already satisfied (e.g. HEAD, 204, 304).
+        # Skip the socket call in that case; the CL-satisfied close block below
+        # still runs.
+        if to_read > 0:
+            if arg_is_memoryview:
+                nread = self._sock.readinto(res, to_read)
+                if not nread:
+                    got_eof = True
+                else:
+                    self.content_read += nread
+                    total = nread
+            else:
+                chunk = self._sock.read(to_read)
+                if not chunk:
+                    got_eof = True
+                    chunk = None
+                else:
+                    self.content_read += len(chunk)
         
         if got_eof:
             if self.content_length is not None and self.content_read < self.content_length:

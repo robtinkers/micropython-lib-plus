@@ -31,7 +31,7 @@ _DEFAULT_WITH_HEADERS = const(0) # i.e. False
 _DEFAULT_TIMEOUT = const(10)
 _GC_FREE_THRESHOLD = const(32768)
 _READ_BLOCK_SIZE = const(1024)
-_READ_BLOCK_SIZE_HEXCRLF = const(b"400\r\n")
+_READ_BLOCK_SIZE_HEXCRLF = b"%X\r\n" % _READ_BLOCK_SIZE
 _REQUEST_HEAD_SIZE = const(256)
 
 _RF_HOST = const(1)
@@ -786,20 +786,20 @@ class HTTPResponse:
                 if not n:
                     if self._length is None:
                         self._length = self._count
-                        self.close()
-                        return 0
-                    if _COMPATISH_EXCEPTIONS:
-                        self.close()
-                        return 0
-                    else:
+                    elif not _COMPATISH_EXCEPTIONS:
                         self._abort_read("EOF in response body")
+                    self.close()
+                    return 0
 
                 self._count += n
                 if self._length is not None and self._count >= self._length:
                     self.close()
                 return n
 
-            out = buf if into else (b"" if amt is None else bytearray(amt))
+            collecting = not into and self._length is None
+            if not into:
+                buf = bytearray() if collecting else bytearray(amt)
+            scratch = None
             total = 0
             data = None
 
@@ -816,25 +816,33 @@ class HTTPResponse:
                     if n == 0:
                         break
 
-                if amt is None:
-                    data = sock.read(n)
-                    n = len(data)
+                if collecting:
+                    if scratch is None:
+                        scratch = _READ_BLOCK_SIZE
+                        if amt is not None:
+                            scratch = min(scratch, amt)
+                        scratch = bytearray(scratch)
+                        scratch = memoryview(scratch)
+
+                    n = sock.readinto(scratch, n)
+                    if n:
+                        data = scratch if n == len(scratch) else scratch[:n]
+                    else:
+                        data = None
                 elif not total:
-                    n = sock.readinto(out, n)
+                    n = sock.readinto(buf, n)
                 else:
                     if data is None:
-                        data = out if isinstance(out, memoryview) else memoryview(out)
+                        data = buf if isinstance(buf, memoryview) else memoryview(buf)
                     n = sock.readinto(data[total:], n)
 
                 if not n:
                     if self._chunked:
                         self._abort_read("EOF in chunk data")
-                    if self._length is not None:
-                        if not (_COMPATISH_EXCEPTIONS and bounded):
-                            self._abort_read("EOF in response body")
-                        self.close()
-                        break
-                    self._length = self._count
+                    if self._length is None:
+                        self._length = self._count
+                    elif not (_COMPATISH_EXCEPTIONS and bounded):
+                        self._abort_read("EOF in response body")
                     self.close()
                     break
 
@@ -846,28 +854,20 @@ class HTTPResponse:
                 elif self._length is not None and self._count >= self._length:
                     self.close()
 
-                if amt is None:
-                    if not out:
-                        out = data
-                    else:
-                        if type(out) is bytes:
-                            out = bytearray(out)
-                        out.extend(data)
+                if collecting:
+                    buf.extend(data)
                     data = None
 
             if into:
                 return total
 
-            if amt is not None and total < amt:
+            if not collecting and total < amt:
                 data = None
-                del out[total:]
+                buf[total:] = b""
 
-            if not _READ_CAN_RETURN_BYTEARRAY and type(out) is not bytes:
-                out = bytes(out)
-
-            return out
+            return buf if _READ_CAN_RETURN_BYTEARRAY else bytes(buf)
         except MemoryError:
-            out = data = sock = None
+            buf = data = scratch = sock = None
             self._release_socket(False)
             gc.collect()
             raise
@@ -1103,8 +1103,6 @@ class HTTPConnection:
         method = _encode_and_validate(method, True)
         if not method:
             raise ValueError("invalid method")
-        if not method.isupper():
-            method = method.upper()
 
         if url:
             valid_url = _encode_and_validate(url, True)
@@ -1223,15 +1221,14 @@ class HTTPConnection:
         return self._count - old_bytes
 
     def getresponse(self, *, with_headers=None):
-        state = self._state
-        if (state != _CS_REQUEST_HEAD_OPEN and state != _CS_REQUEST_BODY_OPEN):
+        if (self._state != _CS_REQUEST_HEAD_OPEN and self._state != _CS_REQUEST_BODY_OPEN):
             raise ResponseNotReady()
 
         method = self.method
         sock = self._sock
         resp = None
         try:
-            if state == _CS_REQUEST_HEAD_OPEN:
+            if self._state == _CS_REQUEST_HEAD_OPEN:
                 if not (self._flags & (_RF_CONTENT_LENGTH | _RF_TRANSFER_ENCODING)):
                     if method in (b"PATCH", b"POST", b"PUT"):
                         if self._count == 0:
@@ -1239,25 +1236,20 @@ class HTTPConnection:
                             self._flags |= _RF_CONTENT_LENGTH
                             self._length = 0
                 self._send_bytes(b"\r\n", False)
-                state = self._state = _CS_REQUEST_BODY_OPEN
 
-            if state == _CS_REQUEST_BODY_OPEN:
-                self._state = _CS_RESPONSE_ACTIVE
-                if self._chunked:
-                    self._send_bytes(b"0\r\n\r\n", False)
-                if self._length is not None and self._count != self._length:
-                    raise RequestLengthMismatch(self._count, self._length)
+            self._state = _CS_RESPONSE_ACTIVE
+            if self._chunked:
+                self._send_bytes(b"0\r\n\r\n", False)
+            if self._length is not None and self._count != self._length:
+                raise RequestLengthMismatch(self._count, self._length)
 
             if _GC_FREE_THRESHOLD and gc.mem_free() < _GC_FREE_THRESHOLD:
                 gc.collect()
 
             if with_headers is None:
-                if not _DEFAULT_WITH_HEADERS:
-                    with_headers = False
-                elif type(_DEFAULT_WITH_HEADERS) is int:
-                    with_headers = True
-                else:
-                    with_headers = _DEFAULT_WITH_HEADERS
+                with_headers = _DEFAULT_WITH_HEADERS
+                if not with_headers or type(with_headers) is int:
+                    with_headers = bool(with_headers)
 
             if not with_headers or isinstance(with_headers, bool):
                 pass
@@ -1283,7 +1275,7 @@ class HTTPConnection:
                     if 100 <= status < 200 and status != 101:
                         _parse_headers(sock, status, False)
                         continue
-                    headers, connection, chunked, content_length, new_location = _parse_headers(
+                    headers, reusable, chunked, content_length, new_location = _parse_headers(
                         sock, status, with_headers)
                     break
             except OSError as e:
@@ -1292,12 +1284,12 @@ class HTTPConnection:
                 else:
                     raise IncompleteRead(e.errno, "socket read failed", None, None, status)
 
-            reusable = version != 10
-
-            if connection == _CM_CLOSE:
+            if reusable == _CM_CLOSE:
                 reusable = False
-            elif connection == _CM_KEEPALIVE:
+            elif reusable == _CM_KEEPALIVE:
                 reusable = True
+            else:
+                reusable = version != 10
 
             if chunked and (version == 10 or content_length is not None):
                 reusable = False
@@ -1322,11 +1314,7 @@ class HTTPConnection:
                 chunked = False
             elif chunked is True:
                 content_length = None
-            elif chunked is False:
-                reusable = False
-                if content_length is None or content_length < 0:
-                    content_length = None
-            elif content_length == -1:
+            elif chunked is False or content_length == -1:
                 reusable = False
                 content_length = None
             else:
@@ -1387,6 +1375,8 @@ class HTTPConnection:
 
         flags = self._flags
         length = self._length
+        if length == -1:
+            length = None
 
         if encode_chunked is not None:
             encode_chunked = bool(encode_chunked)
@@ -1406,6 +1396,13 @@ class HTTPConnection:
         else:
             encode_chunked = (body is not None)
 
+        if (
+            length is not None
+            and isinstance(body, _BUFFER_TYPES)
+            and len(body) > length
+        ):
+            raise RequestLengthMismatch(len(body), length)
+
         self._chunked = encode_chunked
 
         if not (flags & _RF_TRANSFER_ENCODING):
@@ -1413,7 +1410,7 @@ class HTTPConnection:
                 self._append_header(_TRANSFER_ENCODING, _CHUNKED)
                 flags |= _RF_TRANSFER_ENCODING | _RF_TRANSFER_CHUNKED
             elif not (flags & _RF_CONTENT_LENGTH):
-                if length is not None and length >= 0:
+                if length is not None:
                     self._append_header(_CONTENT_LENGTH, b"%d" % length)
                     flags |= _RF_CONTENT_LENGTH
 
@@ -1432,8 +1429,6 @@ class HTTPConnection:
         if not (flags & _RF_ACCEPT_ENCODING):
             self._append_header(_ACCEPT_ENCODING, b"identity")
 
-        if length == -1:
-            length = None
         self._length = length
         self._flags = flags
         return body
@@ -1472,18 +1467,18 @@ class HTTPConnection:
         reader = getattr(body, "readinto", None)
         if reader is not None:
             if self._length is None:
-                size = _READ_BLOCK_SIZE
+                n = _READ_BLOCK_SIZE
             else:
-                size = max(_READ_BLOCK_SIZE >> 3, min(_READ_BLOCK_SIZE, self._length - self._count))
-            buf = bytearray(size)
+                n = max(_READ_BLOCK_SIZE >> 3, min(_READ_BLOCK_SIZE, self._length - self._count))
+            buf = bytearray(n)
             bmv = memoryview(buf)
             while True:
                 n = reader(buf)
-                if type(n) is not int or n < 0 or n > size:
+                if type(n) is not int or n < 0 or n > len(bmv):
                     raise TypeError("invalid body part")
                 if not n:
                     return
-                send(self, bmv if n == size else bmv[:n])
+                send(self, bmv if n == len(bmv) else bmv[:n])
 
         reader = getattr(body, "read", None)
         if reader is not None:
@@ -1510,6 +1505,8 @@ class HTTPConnection:
 
     def _send_chunk(self, data):
         data_length = len(data)
+        if self._length is not None and self._count + data_length > self._length:
+            raise RequestLengthMismatch(self._count + data_length, self._length)
         self._send_bytes(
             _READ_BLOCK_SIZE_HEXCRLF if data_length == _READ_BLOCK_SIZE
             else b"%X\r\n" % data_length, False)
@@ -1518,6 +1515,8 @@ class HTTPConnection:
 
     def _send_bytes(self, data, accounting=True):
         data_length = len(data)
+        if accounting and self._length is not None and self._count + data_length > self._length:
+            raise RequestLengthMismatch(self._count + data_length, self._length)
 
         try:
             n = self._sock.write(data)
@@ -1588,8 +1587,11 @@ if _SSL_ENABLED:
         default_port = 443
 
         def __init__(self, host, port=None, *,
-                     timeout=None, network=None, context=None):
+                     timeout=None, network=None, context=None,
+                     server_hostname=None):
             HTTPConnection.__init__(self, host, port, timeout=timeout, network=network)
+            if server_hostname is not None:
+                self._hostname = server_hostname
             if context is None:
                 context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
                 context.verify_mode = ssl.CERT_NONE

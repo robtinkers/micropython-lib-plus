@@ -605,7 +605,8 @@ class HTTPResponse:
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
-        self.close()
+        if exc_type is None or not issubclass(exc_type, KeyboardInterrupt):
+            self.close()
 
     def close(self):
         self._release_socket(self._count == self._length)
@@ -615,8 +616,8 @@ class HTTPResponse:
         if sock is None:
             raise NotConnected()
         owner = self._owner
-        self._sock = self._owner = None
         owner._release_response(self, None, False)
+        self._sock = self._owner = None
         return sock
 
     if _EXTRA_METHODS:
@@ -792,6 +793,12 @@ class HTTPResponse:
                     return 0
 
                 self._count += n
+                if (
+                    not _COMPATISH_EXCEPTIONS
+                    and self._length is not None
+                    and n < amt
+                ):
+                    self._abort_read("EOF in response body")
                 if self._length is not None and self._count >= self._length:
                     self.close()
                 return n
@@ -1064,7 +1071,8 @@ class HTTPConnection:
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
-        self.close()
+        if exc_type is None or not issubclass(exc_type, KeyboardInterrupt):
+            self.close()
 
     def connect(self):
         if self._state != _CS_IDLE:
@@ -1073,13 +1081,14 @@ class HTTPConnection:
         self._open_socket()
 
     def close(self):
-        _close_quietly(self.detach())
+        self._abort_request()
 
     def detach(self):
-        if self._resp is not None:
+        if self._resp is not None and not self._resp.closed:
             return self._resp.detach()
-        sock, self._sock = self._sock, None
+        sock = self._sock
         self._reset_request()
+        self._sock = None
         return sock
 
     def request(self, method, url, body=None, headers=None, *, encode_chunked=None):
@@ -1537,13 +1546,15 @@ class HTTPConnection:
 
     def _release_response(self, resp, sock, complete):
         if self._resp is not resp:
+            if self._sock is sock:
+                self._sock = None
             _close_quietly(sock)
             return
         reusable = complete and self._state == _CS_RESPONSE_REUSABLE
         self._sock = sock if reusable else None
-        self._reset_request()
         if not reusable:
             _close_quietly(sock)
+        self._reset_request()
 
     def _reset_request(self):
         self._state = _CS_IDLE
@@ -1560,7 +1571,11 @@ class HTTPConnection:
             and self._head is not None
             and len(self._head) <= _REQUEST_HEAD_SIZE
         ):
-            self._head[:] = b""
+            if self._head:
+                try:
+                    self._head[:] = b""
+                except MemoryError:
+                    self._head = None
         else:
             self._head = None
 
@@ -1568,16 +1583,23 @@ class HTTPConnection:
         if resp is None:
             resp = self._resp
 
-        sock, self._sock = self._sock, None
-        resp_sock = None
+        self._state = _CS_RESPONSE_ACTIVE
         try:
-            if resp is not None and not resp.closed:
-                resp_sock = resp.detach()
-        finally:
-            self._reset_request()
-            if resp_sock is not sock:
-                _close_quietly(resp_sock)
+            if resp is not None:
+                resp.close()
+        except Exception:
+            try:
+                HTTPResponse._release_socket(resp, False)
+            except Exception:
+                pass
+            sock, self._sock = self._sock, None
             _close_quietly(sock)
+            self._reset_request()
+            raise
+
+        sock, self._sock = self._sock, None
+        _close_quietly(sock)
+        self._reset_request()
 
 if _SSL_ENABLED:
 
@@ -1607,18 +1629,14 @@ if _SSL_ENABLED:
                 else:
                     self._sock = self._context.wrap_socket(raw)
                 raw = None
-            except MemoryError:
-                _close_quietly(raw)
-                raw = None
-                raise
             except Exception as e:
                 _close_quietly(raw)
                 raw = None
-                if _COMPATISH_EXCEPTIONS:
+                gc.collect()
+                if isinstance(e, MemoryError) or _COMPATISH_EXCEPTIONS:
                     raise
                 elif isinstance(e, OSError):
                     raise ConnectError(e.errno, str(e))
                 else:
                     raise ConnectError(ENONET, str(e))
-            finally:
-                gc.collect()
+            gc.collect()

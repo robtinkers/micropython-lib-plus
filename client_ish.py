@@ -811,12 +811,12 @@ class HTTPResponse:
             data = None
 
             while amt is None or total < amt:
-                if into:
-                    n = amt - total
-                elif amt is None:
+                if amt is None:
                     n = _READ_BLOCK_SIZE
                 else:
-                    n = min(amt - total, _READ_BLOCK_SIZE)
+                    n = amt - total
+                    if collecting:
+                        n = min(n, _READ_BLOCK_SIZE)
 
                 if self._chunked:
                     n = min(n, self._get_chunk_left())
@@ -1207,7 +1207,10 @@ class HTTPConnection:
                 self._open_socket()
             self._send_bytes(self._head, False)
             if _RECYCLE_BUFFERS and len(self._head) <= _REQUEST_HEAD_SIZE:
-                self._head[:] = b""
+                try:
+                    self._head[:] = b""
+                except MemoryError:
+                    self._head = None
             else:
                 self._head = None
             self._count = 0
@@ -1614,12 +1617,13 @@ if _SSL_ENABLED:
             HTTPConnection.__init__(self, host, port, timeout=timeout, network=network)
             if server_hostname is not None:
                 self._hostname = server_hostname
-            if context is None:
-                context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-                context.verify_mode = ssl.CERT_NONE
             self._context = context
 
         def _open_socket(self):
+            if self._context is None:
+                context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+                context.verify_mode = ssl.CERT_NONE
+                self._context = context
             HTTPConnection._open_socket(self)
             raw, self._sock = self._sock, None
             gc.collect()

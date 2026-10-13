@@ -27,7 +27,6 @@ _READ_CAN_RETURN_BYTEARRAY = const(1)
 _RECYCLE_BUFFERS = const(1)
 _SUPPORT_SSL = const(1)
 
-_DEFAULT_WITH_HEADERS = const(0) # i.e. False
 _DEFAULT_TIMEOUT = const(10)
 _GC_FREE_THRESHOLD = const(32768)
 _READ_BLOCK_SIZE = const(1024)
@@ -66,6 +65,8 @@ _OK = const(b"OK")
 _NOT_OK = const(b"Not OK")
 
 _BUFFER_TYPES = (bytes, bytearray, memoryview)
+
+_DEFAULT_WITH_HEADERS = []
 
 class HTTPException(Exception): pass
 
@@ -261,11 +262,7 @@ def _encoding_chunked(haystack: object, value_start: int, mode: bool) -> bool:
 
 @micropython.viper
 def _slice_uint(buf_ptr: ptr8, start: int, end: int, base: int) -> int:
-    while start < end and buf_ptr[start] <= 32:
-        start += 1
-    while end > start and buf_ptr[end - 1] <= 32:
-        end -= 1
-    if start == end:
+    if start >= end:
         return -1
 
     if base == 16:
@@ -485,16 +482,7 @@ def _parse_status_line(sock):
 
     raise BadStatusLine(b"H" + line)
 
-def _header_value(line, name_length):
-    name_length += 1
-    value_end = len(line)
-    while name_length < value_end and line[name_length] <= 32:
-        name_length += 1
-    while value_end > name_length and line[value_end - 1] <= 32:
-        value_end -= 1
-    return line[name_length:value_end]
-
-def _parse_headers(sock, status, with_headers, raw_headers=False):
+def _parse_headers(sock, status, with_headers):
     headers = []
     content_length = None
     content_chunked = None
@@ -508,51 +496,50 @@ def _parse_headers(sock, status, with_headers, raw_headers=False):
         if line[-1] != 10:
             raise IncompleteRead(None, "unterminated response header", None, None, status)
         if line == b"\r\n" or line == b"\n":
-            if with_headers is True and raw_headers:
-                headers.append((line, None))
             return headers, connection, content_chunked, content_length, new_location
 
         name_length = line.find(b":")
+        value_end = len(line)
+        while value_end and line[value_end - 1] <= 32:
+            value_end -= 1
 
         if name_length == -1 or line[0] <= 32:
-            if with_headers is True and raw_headers:
-                headers.append((line, None))
+            if with_headers is True:
+                headers.append((line[:value_end], None))
             continue
 
-        retained_name = None
         if with_headers is True:
             retained_name = line[:name_length]
-        elif with_headers:
+        elif with_headers is False:
+            retained_name = None
+        else:
             for retained_name in with_headers:
                 if len(retained_name) == name_length and _startswith(line, retained_name, name_length, True):
                     break
             else:
                 retained_name = None
 
+        value_start = name_length + 1
+        while value_start < value_end and line[value_start] <= 32:
+            value_start += 1
+
         if name_length == 8 and _startswith(line, _LOCATION, 8, True):
-            new_location = _header_value(line, name_length)
-            if retained_name is not None and not raw_headers:
-                headers.append((retained_name, new_location))
-                continue
+            new_location = line[value_start:value_end]
 
         elif name_length == 10 and _startswith(line, _CONNECTION, 10, True):
             connection = _connection_mode(line, 11, connection)
 
         elif name_length == 14 and _startswith(line, _CONTENT_LENGTH, 14, True):
             if content_length is None:
-                content_length = _slice_uint(line, 15, len(line), 10)
-            elif content_length >= 0 and content_length != _slice_uint(line, 15, len(line), 10):
+                content_length = _slice_uint(line, value_start, value_end, 10)
+            elif content_length >= 0 and content_length != _slice_uint(line, value_start, value_end, 10):
                 content_length = -1
 
         elif name_length == 17 and _startswith(line, _TRANSFER_ENCODING, 17, True):
             content_chunked = _encoding_chunked(line, 18, content_chunked is True)
 
         if retained_name is not None:
-            headers.append((
-                retained_name,
-                line[name_length + 1:] if raw_headers
-                else _header_value(line, name_length),
-            ))
+            headers.append((retained_name, line[value_start:value_end]))
 
 class HTTPResponse:
     _chunk_left = None
@@ -905,6 +892,8 @@ class HTTPResponse:
                 size_end = line.find(b";")
                 if size_end < 0:
                     size_end = len(line) - 2
+                while size_end and line[size_end - 1] <= 32:
+                    size_end -= 1
                 size = _slice_uint(line, 0, size_end, 16)
                 if size < 0:
                     self._abort_read("invalid chunk size")
@@ -1137,6 +1126,7 @@ class HTTPConnection:
         if self._state != _CS_REQUEST_BUILDING:
             raise CannotSendHeader()
 
+        name_length = 0
         try:
             name = _encode_and_validate(name, 4)
             if name is None:
@@ -1147,41 +1137,47 @@ class HTTPConnection:
                 if value is None:
                     raise ValueError("invalid header value")
                 self._append_header(name, value)
+
+            length = self._length
+            flags = self._flags
+            name_length = len(name)
+
+            if name_length == 4 and _startswith(name, _HOST, 4, True):
+                flags |= _RF_HOST
+            elif name_length == 10 and _startswith(name, _CONNECTION, 10, True):
+                if value is not None and _connection_mode(value, 0, _CM_UNKNOWN) == _CM_CLOSE:
+                    flags |= _RF_CONNECTION_CLOSE
+            elif name_length == 14 and _startswith(name, _CONTENT_LENGTH, 14, True):
+                flags |= _RF_CONTENT_LENGTH
+                if value is not None:
+                    value = int(value, 10)
+                    if value >= 0 and (length is None or length == value):
+                        length = value
+                    else:
+                        length = -1
+            elif name_length == 15 and _startswith(name, _ACCEPT_ENCODING, 15, True):
+                flags |= _RF_ACCEPT_ENCODING
+            elif name_length == 17 and _startswith(name, _TRANSFER_ENCODING, 17, True):
+                flags |= _RF_TRANSFER_ENCODING
+                if value is not None:
+                    if _encoding_chunked(value, 0, bool(flags & _RF_TRANSFER_CHUNKED)):
+                        flags |= _RF_TRANSFER_CHUNKED
+                    else:
+                        flags &= ~_RF_TRANSFER_CHUNKED
+
+            self._length = length
+            self._flags = flags
+        except ValueError:
+            if name_length == 0:
+                raise
+            # inside Content-Length parser
+            self._length = -1
+            self._flags = flags
         except MemoryError:
             self._head = None
             self._reset_request()
             gc.collect()
             raise
-
-        name_length = len(name)
-        length = self._length
-        flags = self._flags
-
-        if name_length == 4 and _startswith(name, _HOST, 4, True):
-            flags |= _RF_HOST
-        elif name_length == 10 and _startswith(name, _CONNECTION, 10, True):
-            if value is not None and _connection_mode(value, 0, _CM_UNKNOWN) == _CM_CLOSE:
-                flags |= _RF_CONNECTION_CLOSE
-        elif name_length == 14 and _startswith(name, _CONTENT_LENGTH, 14, True):
-            flags |= _RF_CONTENT_LENGTH
-            if value is not None:
-                value = _slice_uint(value, 0, len(value), 10)
-                if value >= 0 and (length is None or length == value):
-                    length = value
-                else:
-                    length = -1
-        elif name_length == 15 and _startswith(name, _ACCEPT_ENCODING, 15, True):
-            flags |= _RF_ACCEPT_ENCODING
-        elif name_length == 17 and _startswith(name, _TRANSFER_ENCODING, 17, True):
-            flags |= _RF_TRANSFER_ENCODING
-            if value is not None:
-                if _encoding_chunked(value, 0, bool(flags & _RF_TRANSFER_CHUNKED)):
-                    flags |= _RF_TRANSFER_CHUNKED
-                else:
-                    flags &= ~_RF_TRANSFER_CHUNKED
-
-        self._length = length
-        self._flags = flags
 
     def endheaders(self, message_body=None, *, encode_chunked=None):
         if self._state != _CS_REQUEST_BUILDING:
@@ -1279,10 +1275,10 @@ class HTTPConnection:
                 while True:
                     version, status, reason = _parse_status_line(sock)
                     if 100 <= status < 200 and status != 101:
-                        _parse_headers(sock, status, False, False)
+                        _parse_headers(sock, status, False)
                         continue
                     headers, reusable, chunked, content_length, new_location = _parse_headers(
-                        sock, status, with_headers, raw_mode)
+                        sock, status, with_headers)
                     break
             except OSError as e:
                 if _COMPATISH_EXCEPTIONS:
@@ -1511,9 +1507,9 @@ class HTTPConnection:
                 buf = buf.encode()
             if not isinstance(buf, _BUFFER_TYPES):
                 raise TypeError("invalid body part")
-            if buf is not None:
+            if buf:
                 send(self, buf)
-                buf = None
+            buf = None
 
     def _send_chunk(self, data):
         data_length = len(data)

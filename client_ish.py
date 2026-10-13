@@ -161,14 +161,12 @@ def _startswith(haystack_ptr: ptr8, needle_ptr: ptr8, needle_len: int, ci_flag: 
     return True
 
 @micropython.viper
-def _connection_mode(haystack: object, value_start: int, mode: int) -> int:
+def _connection_mode(haystack: object, i: int, mode: int) -> int:
     if mode == _CM_CLOSE:
         return mode
 
     end = int(len(haystack))
     haystack_ptr = ptr8(haystack)
-    i = value_start
-
     while i < end:
         # Skip whitespace and empty list members.
         while i < end:
@@ -279,13 +277,13 @@ def _slice_uint(buf_ptr: ptr8, start: int, end: int, base: int) -> int:
 
     value = 0
     while start < end:
-        char = buf_ptr[start]
-        if 48 <= char and char <= 57:
-            digit = char - 48
-        elif base == 16 and 65 <= char and char <= 70:
-            digit = char - 55
-        elif base == 16 and 97 <= char and char <= 102:
-            digit = char - 87
+        digit = buf_ptr[start]
+        if 48 <= digit and digit <= 57:
+            digit -= 48
+        elif base == 16 and 65 <= digit and digit <= 70:
+            digit -= 55
+        elif base == 16 and 97 <= digit and digit <= 102:
+            digit -= 87
         else:
             return -1
         if value > cutoff or (value == cutoff and digit > cutlim):
@@ -460,7 +458,7 @@ def _parse_status_line(sock):
             first = 10
         elif pos >= 6 and _startswith(line, b"TTP/1.", 6, False):
             first = 11
-        elif len(line) < 4 or not _startswith(line, b"TTP/", 4, False):
+        elif not _startswith(line, b"TTP/", 4, False):
             break
         elif _COMPATISH_EXCEPTIONS:
             raise UnknownProtocol(b"H" + line[:pos])
@@ -549,12 +547,12 @@ def _parse_headers(sock, status, with_headers, raw_headers=False):
         elif name_length == 17 and _startswith(line, _TRANSFER_ENCODING, 17, True):
             content_chunked = _encoding_chunked(line, 18, content_chunked is True)
 
-        if retained_name is None:
-            pass
-        elif raw_headers:
-            headers.append((retained_name, line[name_length+1:]))
-        else:
-            headers.append((retained_name, _header_value(line, name_length)))
+        if retained_name is not None:
+            headers.append((
+                retained_name,
+                line[name_length + 1:] if raw_headers
+                else _header_value(line, name_length),
+            ))
 
 class HTTPResponse:
     _chunk_left = None
@@ -586,7 +584,6 @@ class HTTPResponse:
 
     @property
     def chunked(self):
-        # True iff this response reader removes chunk framing.
         return self._chunked
 
     if _COMPATISH_DECODE_HEADERS:
@@ -719,26 +716,24 @@ class HTTPResponse:
             return list(self._itercookies(None, True))
 
         def getcookie(self, name, default=None):
-            result = default
-            for val in self._itercookies(name, False):
-                result = val # last match wins
-            return result
+            for default in self._itercookies(name, False):
+                pass # last match wins
+            return default
 
         def getrawcookie(self, name, default=None):
-            result = default
-            for val in self._itercookies(name, True):
-                result = val # last match wins
-            return result
+            for default in self._itercookies(name, True):
+                pass # last match wins
+            return default
 
         def drain(self, buf=None):
             if buf is None:
-                size = _READ_BLOCK_SIZE
+                buf = _READ_BLOCK_SIZE
                 if self._length is not None:
-                    size = min(size, self._length - self._count)
-                if size == 0:
+                    buf = min(buf, self._length - self._count)
+                if buf == 0:
                     return
                 try:
-                    buf = bytearray(size)
+                    buf = bytearray(buf)
                 except MemoryError:
                     self._release_socket(False)
                     gc.collect()
@@ -818,7 +813,6 @@ class HTTPResponse:
             collecting = not into and self._length is None
             if not into:
                 buf = bytearray() if collecting else bytearray(amt)
-            scratch = None
             total = 0
             data = None
 
@@ -836,18 +830,13 @@ class HTTPResponse:
                         break
 
                 if collecting:
-                    if scratch is None:
-                        scratch = _READ_BLOCK_SIZE
+                    if data is None:
+                        data = _READ_BLOCK_SIZE
                         if amt is not None:
-                            scratch = min(scratch, amt)
-                        scratch = bytearray(scratch)
-                        scratch = memoryview(scratch)
-
-                    n = sock.readinto(scratch, n)
-                    if n:
-                        data = scratch if n == len(scratch) else scratch[:n]
-                    else:
-                        data = None
+                            data = min(data, amt)
+                        data = bytearray(data)
+                        data = memoryview(data)
+                    n = sock.readinto(data, n)
                 elif not total:
                     n = sock.readinto(buf, n)
                 else:
@@ -877,8 +866,10 @@ class HTTPResponse:
 
                 total += n
                 if collecting:
-                    buf.extend(data)
-                    data = None
+                    if n == len(data):
+                        buf.extend(data)
+                    else:
+                        buf.extend(data[:n])
 
             if into:
                 return total
@@ -889,7 +880,7 @@ class HTTPResponse:
 
             return buf if _READ_CAN_RETURN_BYTEARRAY else bytes(buf)
         except MemoryError:
-            buf = data = scratch = sock = None
+            buf = data = sock = None
             self._release_socket(False)
             gc.collect()
             raise
@@ -909,12 +900,11 @@ class HTTPResponse:
                 line = self._sock.readline()
                 if not line:
                     self._abort_read("EOF before chunk size")
-                line_length = len(line)
-                if (line_length < 2 or line[line_length - 2] != 13 or line[line_length - 1] != 10):
+                if not line.endswith(b"\r\n"):
                     self._abort_read("invalid chunk-size line ending")
                 size_end = line.find(b";")
                 if size_end < 0:
-                    size_end = line_length - 2
+                    size_end = len(line) - 2
                 size = _slice_uint(line, 0, size_end, 16)
                 if size < 0:
                     self._abort_read("invalid chunk size")
@@ -925,10 +915,9 @@ class HTTPResponse:
                     line = self._sock.readline()
                     if not line:
                         self._abort_read("EOF in chunk trailers")
-                    line_length = len(line)
-                    if (line_length < 2 or line[line_length - 2] != 13 or line[line_length - 1] != 10):
+                    if not line.endswith(b"\r\n"):
                         self._abort_read("invalid chunk trailer line ending")
-                    if line_length == 2:  # exactly b"\r\n"
+                    if line == b"\r\n":
                         self._length = self._count
                         self.close()
                         return 0
@@ -987,22 +976,10 @@ class HTTPResponse:
         get = getheader
 
         def get_all(self, name, default=None):
-            name = _encode_and_validate(name, 0)
-            if name is None:
+            values = self.getheadervalues(name)
+            if not values:
                 return default
-            length = len(name)
-            values = None
-            for key, val in self._headers:
-                if val is None:
-                    continue
-                if len(key) == length and _startswith(key, name, length, True):
-                    if values is None:
-                        values = []
-                    if _COMPATISH_DECODE_HEADERS:
-                        values.append(decode_latin1(val))
-                    else:
-                        values.append(val)
-            return default if values is None else values
+            return values
 
         @property
         def length(self):
@@ -1285,7 +1262,7 @@ class HTTPConnection:
             elif isinstance(with_headers, str):
                 with_headers = (with_headers.encode(), )
             elif type(with_headers) is not frozenset:
-                names = []
+                headers = []
                 for name in with_headers:
                     assert not isinstance(name, memoryview), "memoryview not supported for header names"
                     if type(name) is bytes:
@@ -1294,8 +1271,8 @@ class HTTPConnection:
                         name = bytes(name)
                     elif isinstance(name, str):
                         name = name.encode()
-                    names.append(name)
-                with_headers = names
+                    headers.append(name)
+                with_headers = headers
 
             status = None
             try:
@@ -1577,9 +1554,9 @@ class HTTPConnection:
                 self._sock = None
             _close_quietly(sock)
             return
-        reusable = complete and self._state == _CS_RESPONSE_REUSABLE
-        self._sock = sock if reusable else None
-        if not reusable:
+        complete = complete and self._state == _CS_RESPONSE_REUSABLE
+        self._sock = sock if complete else None
+        if not complete:
             _close_quietly(sock)
         self._reset_request()
 

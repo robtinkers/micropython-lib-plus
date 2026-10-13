@@ -31,7 +31,7 @@ _DEFAULT_WITH_HEADERS = const(0) # i.e. False
 _DEFAULT_TIMEOUT = const(10)
 _GC_FREE_THRESHOLD = const(32768)
 _READ_BLOCK_SIZE = const(1024)
-_READ_BLOCK_SIZE_HEXCRLF = b"%X\r\n" % _READ_BLOCK_SIZE
+_READ_BLOCK_SIZE_HEXCRLF = const(b"400\r\n") # b"%X\r\n" % _READ_BLOCK_SIZE
 _REQUEST_HEAD_SIZE = const(256)
 
 _RF_HOST = const(1)
@@ -1511,10 +1511,9 @@ class HTTPConnection:
                 buf = buf.encode()
             if not isinstance(buf, _BUFFER_TYPES):
                 raise TypeError("invalid body part")
-            if not buf:
-                continue
-            send(self, buf)
-            buf = None
+            if buf is not None:
+                send(self, buf)
+                buf = None
 
     def _send_chunk(self, data):
         data_length = len(data)

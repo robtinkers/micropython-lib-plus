@@ -792,6 +792,9 @@ class HTTPResponse:
 
             if into and not self._chunked:
                 n = sock.readinto(buf, amt)
+
+                if n is None:
+                    return None
                 if not n:
                     if self._length is None:
                         self._length = self._count
@@ -807,8 +810,9 @@ class HTTPResponse:
                     and n < amt
                 ):
                     self._abort_read("EOF in response body")
-                if self._length is not None and self._count >= self._length:
+                elif self._length is not None and self._count >= self._length:
                     self.close()
+
                 return n
 
             collecting = not into and self._length is None
@@ -851,6 +855,10 @@ class HTTPResponse:
                         data = buf if isinstance(buf, memoryview) else memoryview(buf)
                     n = sock.readinto(data[total:], n)
 
+                if n is None:
+                    if total == 0:
+                        return None
+                    break
                 if not n:
                     if self._chunked:
                         self._abort_read("EOF in chunk data")
@@ -862,13 +870,12 @@ class HTTPResponse:
                     break
 
                 self._count += n
-                total += n
-
                 if self._chunked:
                     self._chunk_left -= n
                 elif self._length is not None and self._count >= self._length:
                     self.close()
 
+                total += n
                 if collecting:
                     buf.extend(data)
                     data = None
@@ -876,10 +883,9 @@ class HTTPResponse:
             if into:
                 return total
 
-            if _COMPATISH_EXCEPTIONS:
-                if not collecting and total < amt:
-                    data = None
-                    buf[total:] = b""
+            if not collecting and total < amt:
+                data = None
+                buf[total:] = b""
 
             return buf if _READ_CAN_RETURN_BYTEARRAY else bytes(buf)
         except MemoryError:
